@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+__pycache__/
+experiments/*.jsonl
+experiments/**/*.jsonl
+experiments/*-metrics.json
+semantic-evaluation-exports/

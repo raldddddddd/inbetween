@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "name": "xcode-project-productive",
+      "description": "A sustained Xcode project wait is Productive.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"xcode","sessionID":"s-xcode","turnID":"t-xcode","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween — WaitSession.swift","resourceKind":"workspace","resourceName":"Inbetween","presence":"active"}],"manualOverrideSequence":[]}],
+      "lifecycleEvents":[{"name":"UserPromptSubmit","sessionID":"s-xcode","turnID":"t-xcode","time":1700006400},{"name":"Stop","sessionID":"s-xcode","turnID":"t-xcode","time":1700006520}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "vscode-project-productive",
+      "description": "A sustained VS Code workspace is Productive.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"vscode","sessionID":"s-vscode","turnID":"t-vscode","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Visual Studio Code","bundleID":"com.microsoft.VSCode","windowTitle":"SemanticActivityUnderstanding.swift — Inbetween","resourceKind":"workspace","resourceName":"Inbetween","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "developer-documentation-productive",
+      "description": "Developer documentation can be Productive through semantic evidence.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"docs","sessionID":"s-docs","turnID":"t-docs","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Safari","bundleID":"com.apple.Safari","domain":"developer.apple.com","pageTitle":"Swift concurrency documentation","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "technical-learning-semantic",
+      "description": "A technical tutorial context exposes native semantic evidence without a universal site rule.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"tutorial","sessionID":"s-tutorial","turnID":"t-tutorial","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"video.example","pageTitle":"SwiftUI tutorial: async sequences","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "personal-rule-distracted",
+      "description": "Only an explicit personal distracting rule makes this sustained context Distracted.",
+      "referenceTime": 1700006400,
+      "personalRules":[{"scope":"browserDomain","pattern":"social.example","disposition":"distracting"}],
+      "sessions": [{"id":"distracting","sessionID":"s-distract","turnID":"t-distract","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"social.example","pageTitle":"Personal feed","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "chatgpt-away-unclassified",
+      "description": "ChatGPT foreground combined with meaningful idle and away time remains Unclassified.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"chatgpt-away","sessionID":"s-chat","turnID":"t-chat","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006460,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Discussing implementation options","presence":"idle"},{"start":1700006460,"end":1700006520,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Discussing implementation options","presence":"away"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":2,"reviewUnits":[{"presence":"idle","totalSeconds":60,"sourceSliceCount":1},{"presence":"away","totalSeconds":60,"sourceSliceCount":1}]}
+    },
+    {
+      "name": "generic-browser-unclassified",
+      "description": "Generic browsing is context-dependent rather than automatically judged.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"browser","sessionID":"s-browser","turnID":"t-browser","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1,"reviewUnits":[{"presence":"active","totalSeconds":120,"sourceSliceCount":1}]}
+    },
+    {
+      "name": "context-dependent-rule-unclassified",
+      "description": "A personal context-dependent rule preserves ambiguity.",
+      "referenceTime": 1700006400,
+      "personalRules":[{"scope":"browserDomain","pattern":"inbox.example","disposition":"contextDependent"}],
+      "sessions": [{"id":"mail","sessionID":"s-mail","turnID":"t-mail","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"inbox.example","pageTitle":"Inbox","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1}
+    },
+    {
+      "name": "mixed-evidence-unclassified",
+      "description": "A mixed wait contributes its exact Productive and Distracted slice durations.",
+      "referenceTime": 1700006400,
+      "personalRules":[{"scope":"browserDomain","pattern":"social.example","disposition":"distracting"}],
+      "sessions": [{"id":"mixed","sessionID":"s-mixed","turnID":"t-mixed","start":1700006400,"end":1700006640,"activities":[{"start":1700006400,"end":1700006520,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"},{"start":1700006520,"end":1700006640,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"social.example","pageTitle":"Feed","presence":"active"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "away-without-strong-context",
+      "description": "Away time is uncertainty, not Productive evidence.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"away","sessionID":"s-away","turnID":"t-away","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Finder","bundleID":"com.apple.finder","windowTitle":"Downloads","presence":"away"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1,"reviewUnits":[{"presence":"away","totalSeconds":120,"sourceSliceCount":1}]}
+    },
+    {
+      "name": "mixed-slice-durations-and-review",
+      "description": "One wait contributes to three duration categories while only its observed Idle context requests review.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"mixed-three-way","sessionID":"s-three","turnID":"t-three","start":1700006400,"end":1700006470,"activities":[{"start":1700006400,"end":1700006430,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"},{"start":1700006430,"end":1700006450,"app":"Steam","bundleID":"com.valvesoftware.steam","windowTitle":"Library","presence":"active"},{"start":1700006450,"end":1700006465,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Planning","presence":"idle"}],"manualOverrideSequence":[]}],
+      "expected":{"productiveSeconds":30,"distractedSeconds":20,"unclassifiedSeconds":20,"reviewUnitCount":1,"reviewUnits":[{"presence":"idle","totalSeconds":15,"sourceSliceCount":1}]}
+    },
+    {
+      "name": "manual-unclassified-to-productive",
+      "description": "A manual correction changes the effective result without losing automatic Unclassified.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"manual-u-p","sessionID":"s-mup","turnID":"t-mup","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[],"sliceReviewActions":[{"activityIndexes":[0],"action":"productive"}]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "manual-productive-to-distracted",
+      "description": "A manual correction remains authoritative over automatic Productive.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"manual-p-d","sessionID":"s-mpd","turnID":"t-mpd","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[],"sliceReviewActions":[{"activityIndexes":[0],"action":"distracted"}]}],
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "manual-clear-restores-automatic",
+      "description": "Clearing a manual override restores the automatic Productive result.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"manual-clear","sessionID":"s-clear","turnID":"t-clear","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[],"sliceReviewActions":[{"activityIndexes":[0],"action":"distracted"},{"activityIndexes":[0],"action":"clear"}]}],
+      "expected":{"productiveSeconds":120,"distractedSeconds":0,"unclassifiedSeconds":0,"reviewUnitCount":0}
+    },
+    {
+      "name": "legacy-not-recorded",
+      "description": "Historical completed sessions without an automatic result remain Not recorded.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"legacy","sessionID":"s-legacy","turnID":"t-legacy","start":1700006400,"end":1700006460,"classificationMode":"legacyNotRecorded","activities":[],"manualOverrideSequence":[]}],
+      "expected":{"effectiveClassification":null,"reviewRequested":false,"dashboard":{"notRecordedSeconds":60}}
+    },
+    {
+      "name": "legacy-whole-wait-correction",
+      "description": "A classified pre-slice wait retains its whole-wait automatic result and manual override.",
+      "referenceTime": 1700006400,
+      "sessions": [{"id":"legacy-corrected","sessionID":"s-legacy-corrected","turnID":"t-legacy-corrected","start":1700006400,"end":1700006520,"classificationMode":"legacyClassified","activities":[{"start":1700006400,"end":1700006520,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":["distracted"]}],
+      "expected":{"automaticClassification":"productive","effectiveClassification":"distracted","reviewRequested":false,"dashboard":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"notRecordedSeconds":0}}
+    },
+    {
+      "name": "seven-day-dashboard",
+      "description": "Seven chronological buckets use effective classifications and retain zero-activity days.",
+      "referenceTime": 1700006400,
+      "personalRules":[{"scope":"browserDomain","pattern":"social.example","disposition":"distracting"}],
+      "sessions":[
+        {"id":"today","sessionID":"s-d0","turnID":"t-d0","start":1700006400,"end":1700006460,"activities":[{"start":1700006400,"end":1700006460,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[]},
+        {"id":"distracted","sessionID":"s-d1","turnID":"t-d1","start":1699920000,"end":1699920120,"activities":[{"start":1699920000,"end":1699920120,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"social.example","pageTitle":"Feed","presence":"active"}],"manualOverrideSequence":[]},
+        {"id":"unclassified","sessionID":"s-d2","turnID":"t-d2","start":1699833600,"end":1699833690,"activities":[{"start":1699833600,"end":1699833690,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[],"sliceReviewActions":[{"activityIndexes":[0],"action":"leaveUnclassified"}]},
+        {"id":"legacy","sessionID":"s-d3","turnID":"t-d3","start":1699747200,"end":1699747230,"classificationMode":"legacyNotRecorded","activities":[],"manualOverrideSequence":[]}
+      ],
+      "expected":{"dashboard":{"productiveSeconds":60,"distractedSeconds":120,"unclassifiedSeconds":90,"notRecordedSeconds":30,"days":[{"dayOffset":0,"productiveSeconds":60},{"dayOffset":-1,"distractedSeconds":120},{"dayOffset":-2,"unclassifiedSeconds":90},{"dayOffset":-3,"notRecordedSeconds":30},{"dayOffset":-4,"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":0,"notRecordedSeconds":0}]}}
+    },
+    {
+      "name": "permission-resolved-before-threshold",
+      "description": "A supported continuation before eight seconds keeps attention inactive.",
+      "referenceTime": 1700006400,
+      "sessions":[{"id":"permission","sessionID":"s-perm","turnID":"t-perm","start":1700006400,"end":1700006460,"activities":[{"start":1700006400,"end":1700006460,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[]}],
+      "lifecycleEvents":[{"name":"UserPromptSubmit","sessionID":"s-perm","turnID":"t-perm","time":1700006400},{"name":"PermissionRequest","sessionID":"s-perm","turnID":"t-perm","time":1700006410},{"name":"UserPromptSubmit","sessionID":"s-perm","turnID":"t-perm","time":1700006415}],"permissionChecks":[1700006418],
+      "expected":{"permissionState":"inactive"}
+    },
+    {
+      "name": "permission-persistent-after-threshold",
+      "description": "A boundary that persists for eight seconds becomes mayNeedAttention exactly once.",
+      "referenceTime": 1700006400,
+      "sessions":[{"id":"permission","sessionID":"s-persist","turnID":"t-persist","start":1700006400,"end":1700006460,"activities":[{"start":1700006400,"end":1700006460,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[]}],
+      "lifecycleEvents":[{"name":"UserPromptSubmit","sessionID":"s-persist","turnID":"t-persist","time":1700006400},{"name":"PermissionRequest","sessionID":"s-persist","turnID":"t-persist","time":1700006410}],"permissionChecks":[1700006418,1700006420],
+      "expected":{"permissionState":"mayNeedAttention"}
+    },
+    {
+      "name": "permission-continuation-clears-attention",
+      "description": "Continuation after persistent attention returns the delayed state to inactive.",
+      "referenceTime": 1700006400,
+      "sessions":[{"id":"permission","sessionID":"s-continue","turnID":"t-continue","start":1700006400,"end":1700006460,"activities":[{"start":1700006400,"end":1700006460,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[]}],
+      "lifecycleEvents":[{"name":"UserPromptSubmit","sessionID":"s-continue","turnID":"t-continue","time":1700006400},{"name":"PermissionRequest","sessionID":"s-continue","turnID":"t-continue","time":1700006410},{"name":"UserPromptSubmit","sessionID":"s-continue","turnID":"t-continue","time":1700006419}],"permissionChecks":[1700006418],
+      "expected":{"permissionState":"inactive"}
+    }
+  ]
+}

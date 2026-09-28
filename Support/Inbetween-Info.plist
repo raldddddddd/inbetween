@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Inbetween</string>
+    <key>CFBundleExecutable</key>
+    <string>Inbetween</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.inbetween.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Inbetween</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.3.0</string>
+    <key>CFBundleVersion</key>
+    <string>3</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Inbetween reads the active browser tab URL and title while Codex is working so activity can be classified locally.</string>
+</dict>
+</plist>

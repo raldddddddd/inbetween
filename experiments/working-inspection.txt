@@ -1,0 +1,5 @@
+{"bundle":"com.openai.codex","idleConfirmationSeconds":2,"kind":"configuration","pollSeconds":1,"rulesSHA256":"ccb6d3ae95b56f6f753602852d5864f022f5f916ecfe77704431a7c42fc72cbd","run":"unassigned","schemaVersion":1,"signalRules":0,"time":1790500226.503828}
+{"fallback":"one_second_polling","kind":"observer","run":"unassigned","subscriptions":3,"time":1790500226.5241609}
+{"complete":true,"controls":[{"enabled":true,"fingerprints":{"AXTitle":"50a4122943273ad2f00ea92bff9c7cb6235e199f745321cb4272aa1857840463"},"path":"window","role":"AXWindow"},{"enabled":true,"fingerprints":{},"path":"window\/1","role":"AXButton"},{"enabled":true,"fingerprints":{},"path":"window\/2","role":"AXButton"},{"enabled":true,"fingerprints":{},"path":"window\/3","role":"AXButton"}],"kind":"inspection","run":"unassigned","time":1790500226.5344141,"window":0}
+{"accessibilityTrusted":true,"kind":"health","processFound":true,"reason":"snapshot_available","run":"unassigned","time":1790500226.534477}
+{"evidence":["codex_scope_not_confirmed","snapshot_available"],"kind":"sample","run":"unassigned","state":"unknown","time":1790500226.5344901}

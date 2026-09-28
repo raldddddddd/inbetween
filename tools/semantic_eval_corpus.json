@@ -1,0 +1,15 @@
+[
+  {"id":"xcode-project","app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween — WaitSession.swift","resourceKind":"project","resourceName":"Inbetween","expected":"softwareDevelopment"},
+  {"id":"vscode-project","app":"Visual Studio Code","bundleID":"com.microsoft.VSCode","windowTitle":"semantic_eval.py — Inbetween","resourceKind":"workspace","resourceName":"Inbetween","expected":"softwareDevelopment"},
+  {"id":"github-project","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"github.com","pageTitle":"gerald/inbetween — Pull request review","expected":"workTaskExecution"},
+  {"id":"apple-documentation","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"developer.apple.com","pageTitle":"Swift Concurrency documentation","expected":"technicalDocumentation"},
+  {"id":"technical-youtube","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"youtube.com","pageTitle":"Understanding Swift actors","expected":"studyingLearning"},
+  {"id":"entertainment-youtube","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"youtube.com","pageTitle":"Celebrity reaction compilation","expected":"entertainment"},
+  {"id":"technical-chatgpt","app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Understanding Swift actors","expected":"studyingLearning"},
+  {"id":"ambiguous-chatgpt","app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"New chat","expected":null},
+  {"id":"technical-research","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"arxiv.org","pageTitle":"Research paper: actor isolation in concurrent systems","expected":"research"},
+  {"id":"gaming","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"twitch.tv","pageTitle":"Gaming gameplay livestream","expected":"gaming"},
+  {"id":"messaging","app":"Messages","bundleID":"com.apple.MobileSMS","windowTitle":"Conversation","expected":"communication"},
+  {"id":"general-browsing","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.com","pageTitle":"Welcome","expected":"generalBrowsing"},
+  {"id":"mixed-ambiguous","app":"Google Chrome","bundleID":"com.google.Chrome","domain":"youtube.com","pageTitle":"Coding livestream with game chat","expected":null}
+]
