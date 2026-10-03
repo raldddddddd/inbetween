@@ -22,6 +22,10 @@ Inbetween is a macOS menu-bar app that:
 - sends a local notification when a normal Codex turn completes; and
 - can launch at login.
 
+The menu-bar popover is the quick status and review surface. Detailed analytics,
+Reflection, History, rule management, and settings live in a dedicated window
+that can remain open while the user investigates or corrects activity.
+
 The app remains usable when optional monitoring permissions are unavailable.
 
 ## Terminology
@@ -64,8 +68,12 @@ The app remains usable when optional monitoring permissions are unavailable.
 - Idle, away, ambiguous, and unobserved time is Unclassified. Foreground app
   identity alone must not overrule evidence that the user was inactive.
 - Active contexts may use explicit obvious-app evidence (including Steam,
-  Discord, iPhone Mirroring, and the native Games category), structural work
-  metadata, or confidence-gated semantics. Personal rules remain stronger.
+  Discord, iPhone Mirroring, and conservative native application categories),
+  structural work metadata, or confidence-gated semantics. Category evidence
+  treats common work categories as Productive and Entertainment/Games as
+  Distracted, while browsers and other context-dependent apps still require
+  contextual evidence. Ambiguous categories remain Unclassified. Personal
+  rules remain stronger.
 - Personal rules take precedence over built-in and local semantic evidence.
 - Insights use effective per-interval classifications while preserving automatic
   results and user corrections.
@@ -86,6 +94,13 @@ Inbetween must not collect or persist prompts, transcripts, source contents,
 page bodies, keystrokes, screenshots, or input contents. It does not inspect
 browser DOM or network traffic. Local semantic classification uses metadata the
 app already holds; embedding vectors are not persisted.
+
+Optional Featherless Reflection is the sole exception to local processing. It
+is user-triggered and sends minimized, sanitized Today or Last 7 Days snapshots
+plus bounded in-memory conversation context. Reflection sends locally derived
+aggregates, comparisons, and evidence ranges rather than the raw timeline; AI
+output cannot define authoritative metrics or replace local results. Needs
+Review has no AI path and offers only Productive or Distracted.
 
 Permissions must be explained clearly and degrade safely:
 
@@ -108,6 +123,7 @@ Inbetween is not a Codex replacement or remote-control client, a project manager
 to-do list, Pomodoro timer, blocker, screen recorder, employee-monitoring tool,
 surveillance product, or universal productivity score.
 
-Accounts, backend services, cloud sync, remote analytics, AI API calls, mobile or
-cross-device clients, other coding-agent integrations, browser extensions,
+Accounts, backend services, cloud sync, remote analytics, autonomous AI
+classification, background AI analysis, persistent AI memory,
+mobile or cross-device clients, other coding-agent integrations, browser extensions,
 subscriptions, and store distribution are outside the current product.

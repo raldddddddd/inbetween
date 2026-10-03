@@ -9,7 +9,8 @@ let package = Package(
         .executable(name: "codex-ax-probe", targets: ["CodexAXProbe"]),
         .executable(name: "inbetween-semantic-eval", targets: ["SemanticEval"]),
         .executable(name: "inbetween-corrected-history-export", targets: ["CorrectedHistoryExport"]),
-        .executable(name: "inbetween-scenario-runner", targets: ["ScenarioRunner"])
+        .executable(name: "inbetween-scenario-runner", targets: ["ScenarioRunner"]),
+        .executable(name: "inbetween-demo-history-seeder", targets: ["DemoHistorySeeder"])
     ],
     targets: [
         .target(name: "InbetweenCore"),
@@ -22,6 +23,7 @@ let package = Package(
         .executableTarget(name: "SemanticEval", dependencies: ["InbetweenCore", "InbetweenSemanticTools"]),
         .executableTarget(name: "CorrectedHistoryExport", dependencies: ["InbetweenCore", "InbetweenSemanticTools"]),
         .executableTarget(name: "ScenarioRunner", dependencies: ["InbetweenScenarioTools"]),
+        .executableTarget(name: "DemoHistorySeeder", dependencies: ["InbetweenCore"]),
         .testTarget(name: "InbetweenCoreTests", dependencies: ["InbetweenCore"]),
         .testTarget(name: "CodexAXProbeTests", dependencies: ["CodexAXProbe"]),
         .testTarget(name: "InbetweenSemanticToolsTests", dependencies: ["InbetweenSemanticTools"]),

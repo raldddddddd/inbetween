@@ -162,6 +162,8 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
     public var manualClassificationOverride: WaitSessionClassification?
     /// Prevents repeatedly asking about the same completed ambiguous wait.
     public var classificationReviewHandled: Bool?
+    /// Identifies development-only synthetic records. Real and legacy sessions are nil.
+    public let syntheticDataSetID: String?
 
     public init(
         id: UUID = UUID(),
@@ -180,7 +182,8 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         classificationResult: WaitSessionClassificationResult? = nil,
         activityClassificationSlices: [ActivityClassificationSlice]? = nil,
         manualClassificationOverride: WaitSessionClassification? = nil,
-        classificationReviewHandled: Bool? = nil
+        classificationReviewHandled: Bool? = nil,
+        syntheticDataSetID: String? = nil
     ) {
         self.id = id
         self.codexSessionID = codexSessionID
@@ -199,6 +202,7 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         self.activityClassificationSlices = activityClassificationSlices
         self.manualClassificationOverride = manualClassificationOverride
         self.classificationReviewHandled = classificationReviewHandled
+        self.syntheticDataSetID = syntheticDataSetID
     }
 
     public var isUnresolved: Bool {
@@ -270,6 +274,7 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         case activityClassificationSlices
         case manualClassificationOverride
         case classificationReviewHandled
+        case syntheticDataSetID
     }
 
     public init(from decoder: Decoder) throws {
@@ -311,6 +316,10 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         classificationReviewHandled = try container.decodeIfPresent(
             Bool.self,
             forKey: .classificationReviewHandled
+        )
+        syntheticDataSetID = try container.decodeIfPresent(
+            String.self,
+            forKey: .syntheticDataSetID
         )
     }
 }

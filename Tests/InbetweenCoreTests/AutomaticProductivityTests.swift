@@ -165,7 +165,7 @@ struct AutomaticProductivityTests {
             documentName: "Actors"
         ))
         let description = try #require(SemanticActivityDescription(context: context))
-        #expect(description.text == "Page: Swift concurrency documentation | Domain: developer.apple.com | Browser: Google Chrome | Resource type: document | Document: Actors")
+        #expect(description.text == "Page: Swift concurrency documentation | Domain: developer.apple.com | Resource type: document | Document: Actors")
     }
 
     @Test func semanticEvidenceClassifiesRepresentativeContextsConservatively() throws {
@@ -231,13 +231,181 @@ struct AutomaticProductivityTests {
         #expect(mixed?.reasonCodes.contains(.mixedEvidence) == true)
     }
 
+    @Test func capturedTitlesDriveConservativeLocalClassification() throws {
+        let unavailableSemantics = SemanticActivityAnalyzer(provider: SemanticStub { _ in [:] })
+        let classifier = WaitSessionClassifier(
+            rules: .init(),
+            semanticAnalyzer: unavailableSemantics
+        )
+        let cases: [(ActivityContext, WaitSessionClassification)] = [
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "(42) This gameshow lets you use ANY GAME you own - YouTube"
+            ), .distracted),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "I Was Challenged to an Impossible Zelda Race"
+            ), .distracted),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "Doubting My Career Choice in Software Engineering..."
+            ), .productive),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "The Reality of Applying for Tech Jobs as a Fresh Graduate"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "How to Build a Game in Unity"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "Swift concurrency tutorial: actors and async await"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.openai.chat", app: "ChatGPT",
+                windowTitle: "Debugging a Swift concurrency crash"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.microsoft.VSCode", app: "Visual Studio Code",
+                windowTitle: "WaitSession.swift — Inbetween — Visual Studio Code"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.apple.Safari", app: "Safari", domain: "developer.apple.com",
+                pageTitle: "NLEmbedding sentenceEmbedding documentation"
+            ), .productive),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "example.net",
+                pageTitle: "Welcome to the website"
+            ), .unclassified),
+            (try activeContext(
+                bundle: "com.openai.chat", app: "ChatGPT", windowTitle: "New chat"
+            ), .unclassified),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "YouTube"
+            ), .unclassified),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "heremyas"
+            ), .unclassified),
+            (try activeContext(
+                bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+                pageTitle: "Game theory discussion"
+            ), .unclassified)
+        ]
+
+        for (context, expected) in cases {
+            #expect(classifier.classify(context: context).classification == expected)
+        }
+
+        let rule = try #require(PersonalContextRule(
+            scope: .browserDomain,
+            pattern: "youtube.com",
+            disposition: .productive
+        ))
+        let ruleClassifier = WaitSessionClassifier(
+            rules: .init(
+                personalContextRules: [rule]
+            ),
+            semanticAnalyzer: unavailableSemantics
+        )
+        let gameshow = cases[0].0
+        let ruleResult = ruleClassifier.classify(context: gameshow)
+        #expect(ruleResult.classification == .productive)
+        #expect(ruleResult.reasonCodes.contains(.personalProductiveRule))
+
+        let automaticResult = classifier.classify(context: gameshow)
+        #expect(automaticResult.reasonCodes.contains(.highConfidenceEntertainmentEvidence))
+        let decoded = try JSONDecoder().decode(
+            WaitSessionClassificationResult.self,
+            from: JSONEncoder().encode(automaticResult)
+        )
+        #expect(decoded.reasonCodes.contains(.highConfidenceEntertainmentEvidence))
+    }
+
+    @Test func browserTitleNormalizationKeepsRawCaptureAndMakesChromeVariantsEquivalent() throws {
+        let meaningfulTitle = "I was laid off from my AI software engineering job at Amazon"
+        let plain = try activeContext(
+            bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+            pageTitle: "\(meaningfulTitle) - YouTube - Google Chrome"
+        )
+        let noisy = try activeContext(
+            bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+            pageTitle: "(61) \(meaningfulTitle) - YouTube - Audio playing - Google Chrome"
+        )
+
+        #expect(noisy.browserPageTitle == "(61) \(meaningfulTitle) - YouTube - Audio playing - Google Chrome")
+        #expect(ClassificationTitleNormalizer.normalize(plain.browserPageTitle) == meaningfulTitle)
+        #expect(ClassificationTitleNormalizer.normalize(noisy.browserPageTitle) == meaningfulTitle)
+        #expect(SemanticActivityDescription(context: plain) == SemanticActivityDescription(context: noisy))
+        #expect(SemanticActivityDescription(context: noisy)?.text.contains("Audio playing") == false)
+        #expect(SemanticActivityDescription(context: noisy)?.text.contains("Google Chrome") == false)
+
+        let classifier = WaitSessionClassifier(
+            rules: .init(),
+            semanticAnalyzer: SemanticActivityAnalyzer(provider: SemanticStub { _ in [:] })
+        )
+        #expect(classifier.classify(context: plain).classification == .productive)
+        #expect(classifier.classify(context: noisy).classification == .productive)
+    }
+
+    @Test func browserWindowTitleReachesNativeSemanticBoundary() throws {
+        let analyzer = SemanticActivityAnalyzer(provider: SemanticStub { text in
+            text.contains("Quarterly planning draft")
+                ? [.workTaskExecution: 0.90, .generalBrowsing: 0.30]
+                : [:]
+        })
+        let classifier = WaitSessionClassifier(
+            rules: .init(usuallyProductiveBundleIdentifiers: []),
+            semanticAnalyzer: analyzer
+        )
+        let context = try activeContext(
+            bundle: "com.google.Chrome",
+            app: "Google Chrome",
+            windowTitle: "Quarterly planning draft"
+        )
+
+        let result = classifier.classify(context: context)
+
+        #expect(result.classification == .productive)
+        #expect(result.reasonCodes.contains(.sustainedSemanticProductiveContext))
+        #expect(SemanticActivityDescription(context: context)?.text.contains(
+            "Quarterly planning draft"
+        ) == true)
+    }
+
     @Test func semanticInferenceCachesMeaningfulContextIdentity() throws {
         let provider = CountingSemanticProvider()
         let analyzer = SemanticActivityAnalyzer(provider: provider)
         let context = try context(app: "Chrome", domain: "developer.apple.com", title: "Swift concurrency")
         _ = analyzer.inference(for: context)
         _ = analyzer.inference(for: context)
-        #expect(provider.callCount == SemanticActivityCategory.allCases.count)
+        #expect(provider.callCount == SemanticActivityCategory.allCases.reduce(0) {
+            $0 + $1.prototypes.count
+        })
+    }
+
+    @Test func semanticInferenceUsesStrongestFocusedEntertainmentPrototype() throws {
+        let target = SemanticActivityCategory.entertainment.prototypes.last
+        let analyzer = SemanticActivityAnalyzer(provider: PrototypeSemanticStub { prototype in
+            if prototype == target { return 0.91 }
+            if SemanticActivityCategory.softwareDevelopment.prototypes.contains(prototype) {
+                return 0.41
+            }
+            return 0.12
+        })
+        let context = try activeContext(
+            bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
+            pageTitle: "Celebrity highlights"
+        )
+
+        guard case let .distracting(inference) = analyzer.evidence(for: context) else {
+            Issue.record("Expected focused entertainment prototype evidence")
+            return
+        }
+        #expect(inference.category == .entertainment)
+        #expect(inference.similarity == 0.91)
     }
 
     private func event(_ name: LifecycleEventName, at seconds: TimeInterval) -> LifecycleEvent {
@@ -274,6 +442,23 @@ struct AutomaticProductivityTests {
         try #require(ActivityContext(applicationBundleIdentifier: "test.\(app.lowercased().replacingOccurrences(of: " ", with: ""))", applicationName: app, browserDomain: domain, browserPageTitle: title))
     }
 
+    private func activeContext(
+        bundle: String,
+        app: String,
+        domain: String? = nil,
+        pageTitle: String? = nil,
+        windowTitle: String? = nil
+    ) throws -> ActivityContext {
+        try #require(ActivityContext(
+            applicationBundleIdentifier: bundle,
+            applicationName: app,
+            windowTitle: windowTitle,
+            browserDomain: domain,
+            browserPageTitle: pageTitle,
+            presenceState: .active
+        ))
+    }
+
     private func semanticSegment(app: String, title: String, duration: TimeInterval) -> ActivitySegment {
         let start = Date(timeIntervalSince1970: 1_000)
         let context = ActivityContext(applicationBundleIdentifier: "test.\(app.lowercased())", applicationName: app, browserPageTitle: title, presenceState: .active)!
@@ -293,8 +478,22 @@ private struct SemanticStub: SemanticSimilarityProviding {
     }
 
     func similarity(between text: String, and prototype: String) -> Double? {
-        guard let category = SemanticActivityCategory.allCases.first(where: { $0.prototype == prototype }) else { return nil }
+        guard let category = SemanticActivityCategory.allCases.first(where: {
+            $0.prototypes.contains(prototype)
+        }) else { return nil }
         return scores(text)[category] ?? 0.1
+    }
+}
+
+private struct PrototypeSemanticStub: SemanticSimilarityProviding {
+    let score: @Sendable (String) -> Double?
+
+    init(_ score: @escaping @Sendable (String) -> Double?) {
+        self.score = score
+    }
+
+    func similarity(between text: String, and prototype: String) -> Double? {
+        score(prototype)
     }
 }
 

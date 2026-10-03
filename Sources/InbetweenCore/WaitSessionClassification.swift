@@ -57,6 +57,9 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
     case legacyMoveEvidence
     case unobservedGap
     case gameApplicationCategory
+    case productiveApplicationCategory
+    case distractingApplicationCategory
+    case highConfidenceEntertainmentEvidence
 
     private var value: String {
         switch self {
@@ -79,6 +82,9 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
         case .legacyMoveEvidence: "legacyMoveEvidence"
         case .unobservedGap: "unobservedGap"
         case .gameApplicationCategory: "gameApplicationCategory"
+        case .productiveApplicationCategory: "productiveApplicationCategory"
+        case .distractingApplicationCategory: "distractingApplicationCategory"
+        case .highConfidenceEntertainmentEvidence: "highConfidenceEntertainmentEvidence"
         }
     }
 
@@ -104,6 +110,9 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
         case "moveWithStableDesktopContext", "moveWithSustainedAway": self = .legacyMoveEvidence
         case "unobservedGap": self = .unobservedGap
         case "gameApplicationCategory": self = .gameApplicationCategory
+        case "productiveApplicationCategory": self = .productiveApplicationCategory
+        case "distractingApplicationCategory": self = .distractingApplicationCategory
+        case "highConfidenceEntertainmentEvidence": self = .highConfidenceEntertainmentEvidence
         default: throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(), debugDescription: "Unsupported wait-session classification reason")
         }
     }
@@ -158,7 +167,25 @@ public struct WaitSessionClassificationRules: Equatable, Sendable {
 }
 
 public struct WaitSessionClassifier: Sendable {
-    private static let learningContextTokens: Set<String> = ["course", "courses", "documentation", "docs", "guide", "guides", "learn", "learning", "lesson", "lessons", "manual", "reference", "research", "tutorial", "tutorials"]
+    private static let productiveContextTokens: Set<String> = [
+        "api", "coding", "compiler", "course", "courses", "debug", "debugging",
+        "developer", "development", "documentation", "docs", "engineering", "guide",
+        "guides", "learn", "learning", "lesson", "lessons", "manual", "programming",
+        "reference", "research", "tutorial", "tutorials"
+    ]
+    private static let productiveContextPhrases = [
+        "build a game", "game development", "software engineering", "tech jobs"
+    ]
+    private static let distractingContextTokens: Set<String> = [
+        "gameshow", "gameplay"
+    ]
+    private static let distractingContextPhrases = [
+        "comedy compilation", "game show", "gameplay video", "let s play",
+        "movie trailer", "music video", "official trailer", "reaction compilation"
+    ]
+    private static let namedGameContextTokens: Set<String> = [
+        "fortnite", "minecraft", "mario", "pokemon", "roblox", "zelda"
+    ]
     public let rules: WaitSessionClassificationRules
     public let semanticAnalyzer: SemanticActivityAnalyzer
 
@@ -269,9 +296,6 @@ public struct WaitSessionClassifier: Sendable {
             }
         }
 
-        if context.applicationCategoryIdentifier == BuiltInActivityEvidencePolicy.gamesCategoryIdentifier {
-            return .init(classification: .distracted, reasonCodes: [.gameApplicationCategory, .sustainedDistractingApplication], explanation: "The active application declares the native Games category.")
-        }
         if BuiltInActivityEvidencePolicy.distractingBundleIdentifiers.contains(canonicalBundle)
             || rules.usuallyDistractingBundleIdentifiers.contains(canonicalBundle) {
             return .init(classification: .distracted, reasonCodes: [.sustainedDistractingApplication], explanation: "The active application has explicit distracting evidence.")
@@ -279,8 +303,49 @@ public struct WaitSessionClassifier: Sendable {
         if rules.usuallyProductiveBundleIdentifiers.contains(canonicalBundle) {
             return .init(classification: .productive, reasonCodes: [.sustainedProductiveApplication], explanation: "The active application has strong work context.")
         }
+        if !rules.contextDependentBundleIdentifiers.contains(canonicalBundle),
+           let categoryClassification = BuiltInActivityEvidencePolicy.classification(
+               forApplicationCategoryIdentifier: context.applicationCategoryIdentifier
+           ) {
+            switch categoryClassification {
+            case .productive:
+                return .init(
+                    classification: .productive,
+                    reasonCodes: [.productiveApplicationCategory, .sustainedProductiveApplication],
+                    explanation: "The active application declares a productivity-oriented native category."
+                )
+            case .distracted:
+                var reasonCodes: [WaitSessionClassificationReason] = [
+                    .distractingApplicationCategory,
+                    .sustainedDistractingApplication
+                ]
+                if BuiltInActivityEvidencePolicy.isGameCategory(
+                    context.applicationCategoryIdentifier
+                ) {
+                    reasonCodes.insert(.gameApplicationCategory, at: 0)
+                }
+                return .init(
+                    classification: .distracted,
+                    reasonCodes: reasonCodes,
+                    explanation: "The active application declares an entertainment-oriented native category."
+                )
+            case .unclassified:
+                break
+            }
+        }
         if supportsProductiveContext(context) {
             return .init(classification: .productive, reasonCodes: [.sustainedProductiveContext, .richActivityContext], explanation: "Project, workspace, terminal, or learning metadata supports productive activity.")
+        }
+        if supportsDistractingContext(context) {
+            return .init(
+                classification: .distracted,
+                reasonCodes: [
+                    .highConfidenceEntertainmentEvidence,
+                    .sustainedDistractingContext,
+                    .richActivityContext
+                ],
+                explanation: "The normalized title contains high-confidence entertainment or gaming evidence."
+            )
         }
         if let semantic = semanticAnalyzer.evidence(for: context) {
             switch semantic {
@@ -337,16 +402,92 @@ public struct WaitSessionClassifier: Sendable {
     private func supportsProductiveContext(_ context: ActivityContext) -> Bool {
         if context.resourceKind == .project || context.resourceKind == .workspace || context.resourceKind == .terminal { return true }
         guard context.hasRichMetadata else { return false }
-        return !metadataTokens(in: context).isDisjoint(with: Self.learningContextTokens)
+        if !metadataTokens(in: context).isDisjoint(with: Self.productiveContextTokens) {
+            return true
+        }
+        return classificationTitleValues(in: context).contains { value in
+            containsAnyPhrase(Self.productiveContextPhrases, in: value)
+        }
+    }
+
+    private func supportsDistractingContext(_ context: ActivityContext) -> Bool {
+        guard context.hasRichMetadata else { return false }
+        let values = classificationTitleValues(in: context)
+        let tokens = Set(values.flatMap { value in
+            value.lowercased().unicodeScalars
+                .split { !CharacterSet.alphanumerics.contains($0) }
+                .map(String.init)
+        })
+        if !tokens.isDisjoint(with: Self.distractingContextTokens) {
+            return true
+        }
+        if values.contains(where: { containsAnyPhrase(Self.distractingContextPhrases, in: $0) }) {
+            return true
+        }
+        let hasNamedGameContext = !tokens.isDisjoint(with: Self.namedGameContextTokens)
+        let hasChallengeFraming = tokens.contains("race")
+            && (!tokens.isDisjoint(with: ["challenge", "challenged", "impossible"]))
+        return hasNamedGameContext && hasChallengeFraming
     }
 
     private func metadataTokens(in context: ActivityContext) -> Set<String> {
-        Set([context.windowTitle, context.browserDomain, context.browserPageTitle, context.browserURL, context.resourceName, context.documentName, context.resourcePath].compactMap { $0 }.flatMap { value in value.lowercased().unicodeScalars.split { !CharacterSet.alphanumerics.contains($0) }.map(String.init) })
+        Set(metadataValues(in: context).flatMap { value in
+            value.lowercased().unicodeScalars
+                .split { !CharacterSet.alphanumerics.contains($0) }
+                .map(String.init)
+        })
+    }
+
+    private func normalizedMetadataText(_ value: String) -> String {
+        value.lowercased().unicodeScalars
+            .split { !CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined(separator: " ")
+    }
+
+    private func metadataValues(in context: ActivityContext) -> [String] {
+        [
+            ClassificationTitleNormalizer.normalize(context.windowTitle),
+            context.browserDomain,
+            ClassificationTitleNormalizer.normalize(context.browserPageTitle),
+            context.browserURL,
+            context.resourceName,
+            context.documentName,
+            context.resourcePath
+        ].compactMap { $0 }
+    }
+
+    private func classificationTitleValues(in context: ActivityContext) -> [String] {
+        [
+            ClassificationTitleNormalizer.normalize(context.windowTitle),
+            ClassificationTitleNormalizer.normalize(context.browserPageTitle),
+            context.resourceName,
+            context.documentName
+        ].compactMap { $0 }
+    }
+
+    private func containsAnyPhrase(_ phrases: [String], in value: String) -> Bool {
+        let normalized = normalizedMetadataText(value)
+        return phrases.contains { phrase in
+            " \(normalized) ".contains(" \(phrase) ")
+        }
     }
 }
 
 public enum BuiltInActivityEvidencePolicy {
     public static let gamesCategoryIdentifier = "public.app-category.games"
+    public static let productiveCategoryIdentifiers: Set<String> = [
+        "public.app-category.business",
+        "public.app-category.developer-tools",
+        "public.app-category.education",
+        "public.app-category.finance",
+        "public.app-category.productivity",
+        "public.app-category.reference",
+        "public.app-category.utilities"
+    ]
+    public static let distractingCategoryIdentifiers: Set<String> = [
+        "public.app-category.entertainment"
+    ]
     public static let distractingBundleIdentifiers: Set<String> = [
         "com.valvesoftware.steam",
         "com.hnc.Discord",
@@ -358,5 +499,29 @@ public enum BuiltInActivityEvidencePolicy {
         case "com.valvesoftware.steam.helper": "com.valvesoftware.steam"
         default: rawValue
         }
+    }
+
+    public static func classification(
+        forApplicationCategoryIdentifier rawValue: String?
+    ) -> WaitSessionClassification? {
+        guard let identifier = normalizedCategoryIdentifier(rawValue) else { return nil }
+        if productiveCategoryIdentifiers.contains(identifier) { return .productive }
+        if distractingCategoryIdentifiers.contains(identifier) || isGameCategory(identifier) {
+            return .distracted
+        }
+        return nil
+    }
+
+    public static func isGameCategory(_ rawValue: String?) -> Bool {
+        guard let identifier = normalizedCategoryIdentifier(rawValue) else { return false }
+        return identifier == gamesCategoryIdentifier
+            || (identifier.hasPrefix("public.app-category.") && identifier.hasSuffix("-games"))
+    }
+
+    private static func normalizedCategoryIdentifier(_ rawValue: String?) -> String? {
+        guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !value.isEmpty
+        else { return nil }
+        return value
     }
 }

@@ -51,7 +51,7 @@ struct CorrectedHistoryDatasetTests {
         #expect(example.correctionScope == .slice)
         #expect(Set(example.sourceSliceIDs) == Set(slices.map(\.id)))
         #expect(Set(example.sourceActivitySegmentIDs) == Set([repeated.id, second.id]))
-        #expect(example.semanticInput == "Page: Swift concurrency documentation | Domain: developer.apple.com | Browser: Google Chrome")
+        #expect(example.semanticInput == "Page: Swift concurrency documentation | Domain: developer.apple.com")
         #expect(example.contextDurationSeconds == 60)
         #expect(example.contextShareOfSession == 0.5)
         #expect(example.contextShareOfObservedActivity == 1)

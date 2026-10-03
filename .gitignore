@@ -5,3 +5,27 @@ experiments/*.jsonl
 experiments/**/*.jsonl
 experiments/*-metrics.json
 semantic-evaluation-exports/
+
+# macOS
+.DS_Store
+
+# Swift/Xcode/build output
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local configuration/secrets
+.env
+.env.*
+!.env.example
+
+# Local app/runtime data
+*.backup-*.json
+
+# macOS local application data
+wait-sessions.json
+
+# Editor
+.vscode/
+.idea/

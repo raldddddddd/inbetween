@@ -45,4 +45,25 @@ public struct WaitSessionStore {
             ofItemAtPath: fileURL.path
         )
     }
+
+    public func createTimestampedBackup(
+        of sessions: [WaitSession],
+        at date: Date = .now
+    ) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let stem = "backup-\(formatter.string(from: date))"
+        var backupURL = fileURL.deletingPathExtension().appendingPathExtension("\(stem).json")
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: backupURL.path) {
+            backupURL = fileURL.deletingPathExtension()
+                .appendingPathExtension("\(stem)-\(suffix).json")
+            suffix += 1
+        }
+        let backupStore = WaitSessionStore(fileURL: backupURL)
+        try backupStore.save(sessions)
+        return backupURL
+    }
 }

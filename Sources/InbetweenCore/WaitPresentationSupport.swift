@@ -46,6 +46,133 @@ public struct WaitClassificationReviewUnit: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct WaitReviewActivityContext: Equatable, Sendable {
+    public let applicationName: String
+    public let contextTitle: String
+    public let startedAt: Date
+    public let endedAt: Date
+    public let duration: TimeInterval
+
+    public init(
+        applicationName: String,
+        contextTitle: String,
+        startedAt: Date,
+        endedAt: Date,
+        duration: TimeInterval
+    ) {
+        self.applicationName = applicationName
+        self.contextTitle = contextTitle
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.duration = duration
+    }
+}
+
+public enum WaitReviewItemSource: Equatable, Sendable {
+    case sliced(WaitClassificationReviewUnit)
+    case legacy(sessionID: UUID)
+}
+
+/// A read-only projection of one unresolved review choice. It deliberately
+/// keeps navigation and display metadata separate from persisted classification.
+public struct WaitReviewItem: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let source: WaitReviewItemSource
+    public let waitSessionID: UUID
+    public let applicationName: String
+    public let contextTitle: String
+    public let contextLocation: String?
+    public let startedAt: Date
+    public let endedAt: Date
+    public let duration: TimeInterval
+    public let explanation: String
+    public let before: WaitReviewActivityContext?
+    public let after: WaitReviewActivityContext?
+
+    public var effectiveLocalClassification: WaitSessionClassification {
+        switch source {
+        case let .sliced(unit): unit.effectiveClassification ?? .unclassified
+        case .legacy: .unclassified
+        }
+    }
+}
+
+public enum WaitReviewNavigation {
+    public enum Direction: Sendable {
+        case previous
+        case next
+    }
+
+    public static func resolvedSelectionID(
+        preferredID: String?,
+        in items: [WaitReviewItem]
+    ) -> String? {
+        guard !items.isEmpty else { return nil }
+        if let preferredID, items.contains(where: { $0.id == preferredID }) {
+            return preferredID
+        }
+        return items[0].id
+    }
+
+    public static func adjacentSelectionID(
+        from selectedID: String?,
+        direction: Direction,
+        in items: [WaitReviewItem]
+    ) -> String? {
+        guard let resolved = resolvedSelectionID(preferredID: selectedID, in: items),
+              let index = items.firstIndex(where: { $0.id == resolved })
+        else { return nil }
+        switch direction {
+        case .previous:
+            return index > items.startIndex ? items[items.index(before: index)].id : resolved
+        case .next:
+            return index < items.index(before: items.endIndex)
+                ? items[items.index(after: index)].id
+                : resolved
+        }
+    }
+
+    /// Keep the same numeric position when possible; when the final item is
+    /// removed, select the new final item instead.
+    public static func selectionIDAfterRemoving(
+        _ selectedID: String,
+        from items: [WaitReviewItem]
+    ) -> String? {
+        guard let index = items.firstIndex(where: { $0.id == selectedID }) else {
+            return resolvedSelectionID(preferredID: selectedID, in: items)
+        }
+        let remaining = items.filter { $0.id != selectedID }
+        guard !remaining.isEmpty else { return nil }
+        return remaining[min(index, remaining.count - 1)].id
+    }
+
+    public static func position(
+        of selectedID: String?,
+        in items: [WaitReviewItem]
+    ) -> (current: Int, total: Int)? {
+        guard let resolved = resolvedSelectionID(preferredID: selectedID, in: items),
+              let index = items.firstIndex(where: { $0.id == resolved })
+        else { return nil }
+        return (index + 1, items.count)
+    }
+}
+
+/// Keeps the menu-bar window at its current size while the final review action
+/// is applied. Hiding first prevents SwiftUI from shrinking the visible window
+/// away from its menu-bar anchor as the last review card disappears.
+public enum WaitReviewResolutionOrder {
+    public static func perform(
+        isFinalItem: Bool,
+        hidePresentation: () -> Void,
+        applyResolution: () -> Void
+    ) {
+        if isFinalItem {
+            hidePresentation()
+        }
+        applyResolution()
+    }
+}
+
 /// Small, derived presentation helpers for completed wait history.
 ///
 /// Nothing in this file is persisted and no historical session is reclassified.
@@ -66,6 +193,18 @@ public enum WaitPresentationSupport {
         from sessions: [WaitSession]
     ) -> [WaitClassificationReviewUnit] {
         completedHistory(from: sessions).flatMap { classificationUnits(for: $0, pendingOnly: true) }
+    }
+
+    public static func pendingReviewItems(from sessions: [WaitSession]) -> [WaitReviewItem] {
+        completedHistory(from: sessions).flatMap { session in
+            if session.activityClassificationSlices != nil {
+                return classificationUnits(for: session, pendingOnly: true).map {
+                    reviewItem(for: $0, in: session)
+                }
+            }
+            guard session.shouldRequestClassificationReview else { return [] }
+            return [legacyReviewItem(for: session)]
+        }
     }
 
     /// Derived from persisted slices and their exact source-segment UUIDs. The
@@ -110,9 +249,9 @@ public enum WaitPresentationSupport {
         guard session.activityClassificationSlices != nil else { return nil }
         let values = WaitHistoryInsights.classificationDurations(for: session)
         var parts: [String] = []
-        if values.productive > 0 { parts.append("\(WaitDurationFormat.compact(values.productive)) Productive") }
-        if values.distracted > 0 { parts.append("\(WaitDurationFormat.compact(values.distracted)) Distracted") }
-        if values.unclassified > 0 { parts.append("\(WaitDurationFormat.compact(values.unclassified)) Unclassified") }
+        if values.productive >= 1 { parts.append("\(WaitDurationFormat.compact(values.productive)) Productive") }
+        if values.distracted >= 1 { parts.append("\(WaitDurationFormat.compact(values.distracted)) Distracted") }
+        if values.unclassified >= 1 { parts.append("\(WaitDurationFormat.compact(values.unclassified)) Unclassified") }
         return parts.joined(separator: " · ")
     }
 
@@ -163,6 +302,129 @@ public enum WaitPresentationSupport {
 
         return session.classificationResult?.explanation
             ?? "Inbetween could not confidently classify this wait from the recorded activity context."
+    }
+
+    public static func contextTitle(for context: ActivityContext) -> String {
+        let isBrowserContext = context.browserPageTitle != nil
+            || context.browserDomain != nil
+            || context.browserURL != nil
+        let candidates = isBrowserContext
+            ? [
+                context.browserPageTitle,
+                context.windowTitle,
+                context.documentName,
+                context.resourceName,
+                context.browserDomain,
+                context.browserURL
+            ]
+            : [
+                context.resourceName,
+                context.documentName,
+                context.windowTitle,
+                context.resourcePath
+            ]
+        return candidates.compactMap { $0 }.first ?? "Context unavailable"
+    }
+
+    private static func reviewItem(
+        for unit: WaitClassificationReviewUnit,
+        in session: WaitSession
+    ) -> WaitReviewItem {
+        let slices = (session.activityClassificationSlices ?? []).filter {
+            unit.sourceSliceIDs.contains($0.id)
+        }
+        let startedAt = slices.map(\.startedAt).min() ?? session.startTime
+        let endedAt = slices.map(\.endedAt).max()
+            ?? startedAt.addingTimeInterval(unit.totalDuration)
+        let surrounding = surroundingActivity(
+            sourceSegmentIDs: Set(slices.compactMap(\.sourceActivitySegmentID)),
+            in: session.activitySegments
+        )
+        return WaitReviewItem(
+            id: "slice:\(unit.id)",
+            source: .sliced(unit),
+            waitSessionID: session.id,
+            applicationName: unit.context.applicationName,
+            contextTitle: contextTitle(for: unit.context),
+            contextLocation: contextLocation(for: unit.context),
+            startedAt: startedAt,
+            endedAt: endedAt,
+            duration: unit.totalDuration,
+            explanation: unit.automaticReason,
+            before: surrounding.before,
+            after: surrounding.after
+        )
+    }
+
+    private static func legacyReviewItem(for session: WaitSession) -> WaitReviewItem {
+        let ordered = session.activitySegments.sorted(by: activityStartsFirst)
+        let representative = ordered.enumerated().max { lhs, rhs in
+            let left = max(0, lhs.element.duration ?? 0)
+            let right = max(0, rhs.element.duration ?? 0)
+            if left != right { return left < right }
+            return lhs.offset > rhs.offset
+        }
+        let context = representative?.element.context
+        let before = representative.flatMap { value in
+            value.offset > ordered.startIndex ? activityContext(ordered[value.offset - 1]) : nil
+        }
+        let after = representative.flatMap { value in
+            value.offset < ordered.count - 1 ? activityContext(ordered[value.offset + 1]) : nil
+        }
+        let endedAt = session.endTime
+            ?? session.duration.map { session.startTime.addingTimeInterval($0) }
+            ?? session.startTime
+        return WaitReviewItem(
+            id: "legacy:\(session.id.uuidString)",
+            source: .legacy(sessionID: session.id),
+            waitSessionID: session.id,
+            applicationName: context?.applicationName ?? "Activity unavailable",
+            contextTitle: context.map(contextTitle(for:)) ?? "Context unavailable",
+            contextLocation: context.flatMap(contextLocation(for:)),
+            startedAt: session.startTime,
+            endedAt: endedAt,
+            duration: max(0, session.duration ?? endedAt.timeIntervalSince(session.startTime)),
+            explanation: reviewExplanation(for: session),
+            before: before,
+            after: after
+        )
+    }
+
+    private static func surroundingActivity(
+        sourceSegmentIDs: Set<UUID>,
+        in segments: [ActivitySegment]
+    ) -> (before: WaitReviewActivityContext?, after: WaitReviewActivityContext?) {
+        let ordered = segments.sorted(by: activityStartsFirst)
+        let indices = ordered.indices.filter { sourceSegmentIDs.contains(ordered[$0].id) }
+        guard let first = indices.first, let last = indices.last else { return (nil, nil) }
+        let before = first > ordered.startIndex ? activityContext(ordered[first - 1]) : nil
+        let after = last < ordered.count - 1 ? activityContext(ordered[last + 1]) : nil
+        return (before, after)
+    }
+
+    private static func activityContext(_ segment: ActivitySegment) -> WaitReviewActivityContext {
+        let endedAt = segment.endedAt
+            ?? segment.duration.map { segment.startedAt.addingTimeInterval($0) }
+            ?? segment.startedAt
+        return WaitReviewActivityContext(
+            applicationName: segment.context.applicationName,
+            contextTitle: contextTitle(for: segment.context),
+            startedAt: segment.startedAt,
+            endedAt: endedAt,
+            duration: max(0, segment.duration ?? endedAt.timeIntervalSince(segment.startedAt))
+        )
+    }
+
+    private static func activityStartsFirst(_ lhs: ActivitySegment, _ rhs: ActivitySegment) -> Bool {
+        if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func contextLocation(for context: ActivityContext) -> String? {
+        let title = contextTitle(for: context)
+        return [context.browserDomain, context.resourceName, context.documentName]
+            .compactMap { $0 }
+            .first { $0.caseInsensitiveCompare(title) != .orderedSame }
     }
 
     private static func newestCompletedFirst(_ lhs: WaitSession, _ rhs: WaitSession) -> Bool {

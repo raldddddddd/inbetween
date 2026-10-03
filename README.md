@@ -6,7 +6,10 @@ observes limited foreground activity while a wait is active, and helps the user
 return when the turn is ready.
 
 The app is local-first. It does not use accounts, a backend, remote analytics,
-screenshots, page bodies, prompts, source contents, or cloud AI.
+screenshots, page bodies, prompts, or source contents. Needs Review is always a
+manual Productive-or-Distracted decision. An optional, user-triggered
+Featherless integration interprets compact Today or Last 7 Days snapshots;
+all metrics remain locally calculated.
 
 ## Requirements
 
@@ -35,6 +38,33 @@ Optional Accessibility permission adds focused-window metadata. Optional macOS
 Automation permission lets Inbetween read the front tab URL and title from
 Chrome or Safari. Without either permission, monitoring degrades to the metadata
 that remains available.
+
+## Optional Featherless features
+
+Configure Featherless in the app's Settings. The API key is stored in macOS
+Keychain and the model preference is stored locally. Development launches can
+instead use these fallback environment variables:
+
+```sh
+export INBETWEEN_FEATHERLESS_API_KEY="your-featherless-api-key"
+export INBETWEEN_FEATHERLESS_MODEL="owner/model-id"
+export INBETWEEN_FEATHERLESS_BASE_URL="https://api.featherless.ai/v1" # optional default
+export INBETWEEN_FEATHERLESS_TIMEOUT_SECONDS="20"                     # optional, 1–120
+```
+
+For a development launch that reliably inherits them, run the app executable
+from that configured shell. Reflection sends nothing when opened. A question
+sends a sanitized aggregate for the selected scope plus bounded recent
+conversation context; durations, comparisons, counts, and evidence mappings are
+calculated locally. Conversations stay in memory and are never persisted.
+
+To merge the deterministic September demo history after building, use the
+explicit development utility. It creates a backup and replaces only records
+carrying its own provenance marker; real history is preserved:
+
+```sh
+swift run inbetween-demo-history-seeder --reference-date 2026-09-29 --confirm
+```
 
 ## Test
 

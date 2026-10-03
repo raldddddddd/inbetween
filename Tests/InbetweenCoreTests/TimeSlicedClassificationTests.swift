@@ -69,6 +69,42 @@ struct TimeSlicedClassificationTests {
         #expect(legacy.activityClassificationSlices == nil)
     }
 
+    @Test func stopClassifiesPersistedBrowserTitlesPerSlice() throws {
+        let classifier = WaitSessionClassifier(
+            rules: .init(usuallyProductiveBundleIdentifiers: []),
+            semanticAnalyzer: SemanticActivityAnalyzer(provider: SliceSemanticStub([:]))
+        )
+        var tracker = WaitSessionTracker(classifier: classifier)
+        _ = tracker.apply(event(.userPromptSubmit, 1_000))
+        let gameshow = context(
+            "com.google.Chrome", "Google Chrome", domain: "youtube.com",
+            title: "(42) This gameshow lets you use ANY GAME you own - YouTube - Audio playing - Google Chrome"
+        )
+        let tutorial = context(
+            "com.google.Chrome", "Google Chrome", domain: "youtube.com",
+            title: "Swift concurrency tutorial: actors and async await"
+        )
+        _ = tracker.recordActivity(ActivityObservation(
+            context: gameshow,
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        ))
+        _ = tracker.recordActivity(ActivityObservation(
+            context: tutorial,
+            observedAt: Date(timeIntervalSince1970: 1_030)
+        ))
+        _ = tracker.apply(event(.stop, 1_060))
+
+        let session = try #require(tracker.sessions.first)
+        let slices = try #require(session.activityClassificationSlices)
+        #expect(session.activitySegments.map(\.context.browserPageTitle) == [
+            gameshow.browserPageTitle, tutorial.browserPageTitle
+        ])
+        #expect(slices.map(\.automaticClassification) == [.distracted, .productive])
+        #expect(slices.map(\.sourceActivitySegmentID) == session.activitySegments.map(\.id))
+        #expect(session.classificationResult?.classification == .unclassified)
+        #expect(session.classificationResult?.reasonCodes.contains(.mixedEvidence) == true)
+    }
+
     @Test func presenceGatesAllForegroundEvidence() {
         let classifier = WaitSessionClassifier()
         for presence in [UserPresenceState.idle, .away] {
@@ -131,6 +167,86 @@ struct TimeSlicedClassificationTests {
         #expect(classifier.classify(context: context(
             "com.google.Chrome", "Google Chrome", resourceKind: .project
         )).classification == .productive)
+    }
+
+    @Test func nativeApplicationCategoriesClassifyConservativelyAndPersistReasons() throws {
+        let classifier = WaitSessionClassifier(rules: .init(usuallyProductiveBundleIdentifiers: []))
+        let productiveCategories = [
+            "business", "developer-tools", "education", "finance",
+            "productivity", "reference", "utilities"
+        ]
+        for category in productiveCategories {
+            let result = classifier.classify(context: context(
+                "com.example.\(category)", category,
+                category: "public.app-category.\(category)"
+            ))
+            #expect(result.classification == .productive)
+            #expect(result.reasonCodes.contains(.productiveApplicationCategory))
+        }
+
+        for category in ["entertainment", "games", "board-games", "strategy-games"] {
+            let result = classifier.classify(context: context(
+                "com.example.\(category)", category,
+                category: "public.app-category.\(category)"
+            ))
+            #expect(result.classification == .distracted)
+            #expect(result.reasonCodes.contains(.distractingApplicationCategory))
+        }
+
+        let result = classifier.classify(context: context(
+            "com.example.utility", "Utility",
+            category: "public.app-category.utilities"
+        ))
+        let decoded = try JSONDecoder().decode(
+            WaitSessionClassificationResult.self,
+            from: JSONEncoder().encode(result)
+        )
+        #expect(decoded.reasonCodes.contains(.productiveApplicationCategory))
+    }
+
+    @Test func contextualAndAmbiguousCategoriesRemainUnclassifiedWithoutStrongerEvidence() {
+        let classifier = WaitSessionClassifier(rules: .init(usuallyProductiveBundleIdentifiers: []))
+        for bundle in WaitSessionClassificationRules.defaultContextDependentBundleIdentifiers {
+            let result = classifier.classify(context: context(
+                bundle, "Context-dependent app",
+                category: "public.app-category.productivity"
+            ))
+            #expect(result.classification == .unclassified)
+            #expect(!result.reasonCodes.contains(.productiveApplicationCategory))
+        }
+
+        for category in [
+            "music", "video", "social-networking", "news", "lifestyle",
+            "photography", "graphics-design"
+        ] {
+            let result = classifier.classify(context: context(
+                "com.example.\(category)", category,
+                category: "public.app-category.\(category)"
+            ))
+            #expect(result.classification == .unclassified)
+            #expect(result.reviewSuggested)
+        }
+    }
+
+    @Test func personalRuleOverridesNativeApplicationCategory() throws {
+        let rule = try #require(PersonalContextRule(
+            scope: .applicationBundleIdentifier,
+            pattern: "com.example.utility",
+            disposition: .distracting
+        ))
+        let classifier = WaitSessionClassifier(rules: .init(
+            usuallyProductiveBundleIdentifiers: [],
+            personalContextRules: [rule]
+        ))
+
+        let result = classifier.classify(context: context(
+            "com.example.utility", "Utility",
+            category: "public.app-category.utilities"
+        ))
+
+        #expect(result.classification == .distracted)
+        #expect(result.reasonCodes.contains(.personalDistractingRule))
+        #expect(!result.reasonCodes.contains(.productiveApplicationCategory))
     }
 
     @Test func semanticConfidenceCompetesAcrossDispositionsNotSiblingCategories() {
@@ -221,7 +337,9 @@ private struct SliceSemanticStub: SemanticSimilarityProviding {
     let scores: [SemanticActivityCategory: Double]
     init(_ scores: [SemanticActivityCategory: Double]) { self.scores = scores }
     func similarity(between text: String, and prototype: String) -> Double? {
-        guard let category = SemanticActivityCategory.allCases.first(where: { $0.prototype == prototype }) else { return nil }
+        guard let category = SemanticActivityCategory.allCases.first(where: {
+            $0.prototypes.contains(prototype)
+        }) else { return nil }
         return scores[category] ?? 0.1
     }
 }

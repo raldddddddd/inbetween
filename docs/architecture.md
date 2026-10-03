@@ -14,13 +14,14 @@ a SwiftUI `MenuBarExtra`; reusable domain logic lives in `InbetweenCore`.
 | Lifecycle input | Codex project hooks invoke `tools/fallback_lifecycle_probe.py`, which allowlists metadata and sends one Unix datagram. |
 | Transport | `UnixDatagramEventReceiver` owns `/tmp/inbetween-lifecycle.sock` as a local `0600` socket. |
 | App orchestration | `LifecycleViewModel` validates events, updates lifecycle and wait-session state, persists changes, controls monitoring, and dispatches notifications. |
-| Domain model | `InbetweenCore` contains lifecycle, waits, activity contexts, classification, personal rules, presentation, and insight logic. |
+| Domain model | `InbetweenCore` contains lifecycle, waits, activity contexts, classification, personal rules, optional Reflection boundaries, presentation, and insight logic. |
 | Activity monitoring | `ForegroundActivityMonitor` uses native workspace, idle-time, Accessibility, and selected Apple Events interfaces. |
 | Persistence | JSON files under the user's `Application Support/Inbetween` directory store wait sessions and personal context rules. |
-| UI | One reusable menu-bar window presents current state, reviews, seven-day insights, history, rules, permissions, and settings. |
+| UI | A compact menu-bar surface presents current state, fast review actions, and a seven-day glance; a dedicated SwiftUI window holds detailed review, Reflection, analytics, History, rules, permissions, and settings. |
 
-There are no runtime package dependencies, network services, accounts, or
-backend components.
+There are no runtime package dependencies, accounts, or backend components. The
+only network path is an explicitly triggered OpenAI-compatible Reflection
+request configured through Keychain-backed settings or development environment variables.
 
 ## Lifecycle data flow
 
@@ -79,12 +80,17 @@ For an active-presence context, evidence is evaluated in this order:
 
 1. the most-specific matching personal context rule;
 2. explicit built-in application/category evidence;
-3. supported project, workspace, terminal, or learning metadata;
-4. confidence-gated semantic evidence from macOS Natural Language embeddings;
+3. supported project, workspace, terminal, or high-confidence text metadata;
+4. confidence-gated semantic evidence from macOS Natural Language sentence embeddings;
 5. Unclassified when evidence is absent, neutral, or ambiguous.
 
 Inactive presence always gates foreground evidence to Unclassified. Semantic
-input is a compact representation of already retained metadata; query strings,
+input is a compact representation of already retained metadata. Classification
+strips notification counts and trailing browser/media chrome from that input
+without rewriting captured history. Narrow entertainment title patterns run
+before semantic inference; semantic entertainment scoring uses focused gaming,
+comedy/reaction, casual video, music/movie, and pop-culture prototypes while
+retaining conservative confidence and margin thresholds. Query strings,
 fragments, opaque path tokens, page bodies, and vectors are not persisted.
 
 Manual corrections apply to specific review units/slices and do not replace the
@@ -96,8 +102,25 @@ Review grouping uses meaningful context identity plus presence, so Active, Idle,
 and Away remain independently reviewable even for the same app or page.
 Noncontiguous equivalent slices may share a review unit, but unobserved gaps do
 not request review. Built-in obvious-app evidence includes canonical Steam and
-Steam Helper handling, Discord, iPhone Mirroring, and the native Games category;
-it applies only while presence is Active.
+Steam Helper handling, Discord, iPhone Mirroring, and conservative native app
+categories. Business, Developer Tools, Education, Finance, Productivity,
+Reference, and Utilities are Productive; Entertainment and Games categories are
+Distracted. Browsers, ChatGPT, Codex, and other context-dependent apps ignore
+their declared category and continue through contextual evidence. Ambiguous or
+missing categories remain Unclassified. Category evidence applies only while
+presence is Active, and personal rules remain stronger.
+
+Needs Review is deliberately manual: unresolved items remain Unclassified until
+the user chooses Productive or Distracted. No AI provider, prompt, or suggestion
+path is part of review.
+
+Reflection is on-demand. `AIInsightSnapshotBuilder` locally derives
+classification and presence durations, focus/distraction blocks, context
+switches, sanitized top contexts, day comparisons, and stable evidence ranges
+for Today or Last 7 Days. Opening or changing scope sends nothing. Only a user
+question sends the compact snapshot and at most six recent messages. Output is
+sanitized and may cite only known evidence IDs. Conversations are isolated by
+scope and snapshot fingerprint, held in memory, and discarded when stale.
 
 ## Local files and diagnostics
 
@@ -114,6 +137,9 @@ Diagnostics must never affect lifecycle handling or notification delivery.
 - `InbetweenScenarioTools` and `inbetween-scenario-runner` exercise production
   slice classification, review, and duration aggregation in memory without
   reading real user data. Explicit legacy fixtures retain whole-wait coverage.
+- `inbetween-demo-history-seeder` is an explicit merge-only development tool.
+  It backs up the wait store, tags deterministic synthetic sessions, replaces
+  only its own records, and refuses to generate on or after its reference date.
 - `InbetweenSemanticTools`, `inbetween-semantic-eval`, and
   `inbetween-corrected-history-export` support local classifier evaluation. New
   exports label only corrected slices; legacy correction rows declare their

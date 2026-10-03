@@ -1,6 +1,45 @@
 import Foundation
 import NaturalLanguage
 
+/// Removes presentation-only browser chrome from titles used by the local
+/// classifier. The captured `ActivityContext` remains unchanged and is still
+/// the source of truth for history and review.
+enum ClassificationTitleNormalizer {
+    private static let genericTitles: Set<String> = [
+        "arc", "audio playing", "brave", "chromium", "google chrome",
+        "microsoft edge", "mozilla firefox", "safari", "youtube"
+    ]
+    private static let trailingChromePattern =
+        #"\s*[-–—|]\s*(?:arc|audio playing|brave|chromium|google chrome|microsoft edge|mozilla firefox|safari|youtube)\s*$"#
+
+    static func normalize(_ value: String?) -> String? {
+        guard var normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty
+        else { return nil }
+
+        normalized = normalized.replacingOccurrences(
+            of: #"^(?:\(\d+\)\s*)+"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        while true {
+            let stripped = normalized.replacingOccurrences(
+                of: trailingChromePattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard stripped != normalized else { break }
+            normalized = stripped
+        }
+
+        guard !normalized.isEmpty,
+              !genericTitles.contains(normalized.lowercased())
+        else { return nil }
+        return normalized
+    }
+}
+
 /// A compact, inspectable description made solely from activity metadata that
 /// Inbetween already collects. It deliberately excludes page bodies, source
 /// contents, prompts, and all input data.
@@ -24,11 +63,14 @@ public struct SemanticActivityDescription: Equatable, Sendable {
                 parts.append("Path: \(path)")
             }
             guard !parts.isEmpty else { return nil }
-            parts.append("Browser: \(context.applicationName)")
         } else {
             parts.append("App: \(context.applicationName)")
-            if let title = context.browserPageTitle { parts.append("Page: \(title)") }
-            if let title = context.windowTitle { parts.append("Window: \(title)") }
+            if let title = ClassificationTitleNormalizer.normalize(context.browserPageTitle) {
+                parts.append("Page: \(title)")
+            }
+            if let title = ClassificationTitleNormalizer.normalize(context.windowTitle) {
+                parts.append("Window: \(title)")
+            }
         }
         if let kind = context.resourceKind { parts.append("Resource type: \(kind.rawValue)") }
         if let name = context.resourceName { parts.append("Context: \(name)") }
@@ -47,19 +89,17 @@ public struct SemanticActivityDescription: Equatable, Sendable {
     ]
 
     private static let genericBrowserTitles: Set<String> = [
-        "about:blank", "blank page", "google chrome", "new tab", "safari", "start page", "welcome"
+        "about:blank", "blank page", "new tab", "start page", "welcome"
     ]
     private static let genericBrowserDomains: Set<String> = [
         "example.com", "example.net", "example.org", "localhost"
     ]
 
     private static func meaningfulBrowserTitle(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              !genericBrowserTitles.contains(trimmed.lowercased())
+        guard let normalized = ClassificationTitleNormalizer.normalize(value),
+              !genericBrowserTitles.contains(normalized.lowercased())
         else { return nil }
-        return trimmed
+        return normalized
     }
 
     private static func normalizedDomain(_ value: String) -> String {
@@ -108,20 +148,43 @@ public enum SemanticActivityCategory: String, CaseIterable, Sendable {
     case generalBrowsing
 
     /// Short prototype phrases are centralized here so the classification layer
-    /// does not rely on scattered site or title allowlists.
-    public var prototype: String {
+    /// does not rely on scattered site or title allowlists. Entertainment uses
+    /// several focused concepts because one broad centroid under-represented
+    /// real gaming, reaction, music, and pop-culture titles.
+    public var prototypes: [String] {
         switch self {
-        case .softwareDevelopment: "software development programming coding source code project workspace"
-        case .technicalDocumentation: "technical documentation API reference developer guide"
-        case .studyingLearning: "studying learning tutorial lesson educational course"
-        case .research: "research investigation technical analysis scholarly information"
-        case .workTaskExecution: "work task execution planning writing project management"
-        case .communication: "communication conversation messaging chat email"
-        case .entertainment: "entertainment funny video music celebrity movie television"
-        case .gaming: "video game gaming gameplay game stream"
-        case .generalBrowsing: "general web browsing news social media website"
+        case .softwareDevelopment:
+            ["software development programming coding source code project workspace"]
+        case .technicalDocumentation:
+            ["technical documentation API reference developer guide"]
+        case .studyingLearning:
+            ["studying learning tutorial lesson educational course"]
+        case .research:
+            ["research investigation technical analysis scholarly information"]
+        case .workTaskExecution:
+            ["work task execution planning writing project management"]
+        case .communication:
+            ["communication conversation messaging chat email"]
+        case .entertainment:
+            [
+                "comedy reaction entertainment funny compilation humor",
+                "casual entertainment video variety show leisure watching",
+                "music video movie trailer television entertainment",
+                "pop culture celebrity entertainment highlights"
+            ]
+        case .gaming:
+            [
+                "gaming entertainment gameplay let's play game stream",
+                "video game challenge speedrun gaming race"
+            ]
+        case .generalBrowsing:
+            ["general web browsing news social media website"]
         }
     }
+
+    /// The primary phrase remains available to development tooling that labels
+    /// scores by semantic category.
+    public var prototype: String { prototypes[0] }
 
     public var isProductiveConcept: Bool {
         switch self {
@@ -244,7 +307,9 @@ public final class SemanticActivityAnalyzer: @unchecked Sendable {
         lock.unlock()
 
         let scores = SemanticActivityCategory.allCases.compactMap { category -> (SemanticActivityCategory, Double)? in
-            provider.similarity(between: description.text, and: category.prototype).map { (category, $0) }
+            category.prototypes.compactMap {
+                provider.similarity(between: description.text, and: $0)
+            }.max().map { (category, $0) }
         }.sorted { $0.1 > $1.1 }
         let inference: SemanticActivityInference?
         if let best = scores.first {
