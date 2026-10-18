@@ -19,7 +19,6 @@ enum AIUIState: Equatable {
 
 enum DashboardDestination: String, CaseIterable, Identifiable {
     case overview
-    case review
     case reflection
     case history
     case settings
@@ -29,7 +28,6 @@ enum DashboardDestination: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: "Overview"
-        case .review: "Needs Review"
         case .reflection: "Reflection"
         case .history: "History"
         case .settings: "Settings"
@@ -39,7 +37,6 @@ enum DashboardDestination: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .overview: "chart.bar.xaxis"
-        case .review: "questionmark.circle"
         case .reflection: "sparkles"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
@@ -49,26 +46,90 @@ enum DashboardDestination: String, CaseIterable, Identifiable {
 
 @main
 struct InbetweenApp: App {
-    @StateObject private var model = LifecycleViewModel()
+    @StateObject private var model: LifecycleViewModel
+
+    init() {
+        let model = LifecycleViewModel()
+        _model = StateObject(wrappedValue: model)
+        if ProcessInfo.processInfo.arguments.contains("--inbetween-test-open-reflection") {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 820, height: 640),
+                    styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.title = "Reflection Verification"
+                window.contentView = NSHostingView(rootView: DashboardView(model: model))
+                window.center()
+                window.makeKeyAndOrderFront(nil)
+                InbetweenUITestWindow.window = window
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+        }
+    }
 
     var body: some Scene {
-        MenuBarExtra("Inbetween", systemImage: model.menuBarSymbol) {
+        MenuBarExtra(
+            isIsolatedUITest ? "Inbetween UI Test" : "Inbetween",
+            systemImage: isIsolatedUITest ? "testtube.2" : model.menuBarSymbol
+        ) {
             MenuBarStatusView(model: model)
                 .frame(width: 360)
         }
         .menuBarExtraStyle(.window)
 
-        Window("Inbetween", id: "dashboard") {
+        Window(isReflectionVerification ? "Reflection Verification" : "Inbetween", id: "dashboard") {
             DashboardView(model: model)
                 .frame(minWidth: 720, minHeight: 560)
         }
         .defaultSize(width: 820, height: 640)
+        .commands {
+            if ProcessInfo.processInfo.arguments.contains("--inbetween-test-data-directory") {
+                InbetweenUITestCommands(model: model)
+            }
+        }
+    }
+
+    private var isReflectionVerification: Bool {
+        ProcessInfo.processInfo.arguments.contains("--inbetween-test-open-reflection")
+    }
+
+    private var isIsolatedUITest: Bool {
+        ProcessInfo.processInfo.arguments.contains("--inbetween-test-data-directory")
+            || ProcessInfo.processInfo.environment["INBETWEEN_TEST_DATA_DIRECTORY"] != nil
+    }
+}
+
+@MainActor
+private enum InbetweenUITestWindow {
+    static var window: NSWindow?
+}
+
+private struct InbetweenUITestCommands: Commands {
+    @ObservedObject var model: LifecycleViewModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandMenu("Inbetween UI Test") {
+            Button("Open Dashboard") { open(.overview) }
+            Button("Open History") { open(.history) }
+            Button("Open Reflection") { open(.reflection) }
+        }
+    }
+
+    private func open(_ destination: DashboardDestination) {
+        model.dashboardDestination = destination
+        openWindow(id: "dashboard")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
 @MainActor
 final class LifecycleViewModel: ObservableObject {
     private static let aiModelPreferenceKey = "featherless.model"
+    private static let testKeychainArgument = "--inbetween-test-use-configured-keychain"
     private struct PermissionAttentionHandlingResult {
         let before: DelayedPermissionAttentionState
         let after: DelayedPermissionAttentionState
@@ -97,10 +158,12 @@ final class LifecycleViewModel: ObservableObject {
     @Published private(set) var aiConfigurationStatus = "Checking AI settings…"
     @Published private(set) var aiCredentialSource: FeatherlessCredentialSource?
     @Published private(set) var configuredAIModel = ""
-    @Published var dashboardDestination: DashboardDestination = .overview
+    @Published var dashboardDestination: DashboardDestination = ProcessInfo.processInfo.arguments
+        .contains("--inbetween-test-open-reflection") ? .reflection : .overview
 
     private var stateMachine = LifecycleStateMachine()
     private var sessionTracker: WaitSessionTracker
+    private var persistedSessionSnapshot: [WaitSession]?
     private let sessionStore: WaitSessionStore
     private let contextRuleStore: ContextRuleStore
     private let latencyRecorder: StopLatencyRecorder
@@ -113,6 +176,7 @@ final class LifecycleViewModel: ObservableObject {
     private var reflectionCoordinator: ReflectionConversationCoordinator?
     private var displayedConversationKeys: [ReflectionScope: ReflectionConversationKey] = [:]
     private var activeReflectionScope: ReflectionScope = .today
+    private var aiConfigurationRefreshID = UUID()
     private let parser = LifecycleEventParser()
     private var receiver: UnixDatagramEventReceiver?
     private var activityMonitor: ForegroundActivityMonitor!
@@ -121,30 +185,60 @@ final class LifecycleViewModel: ObservableObject {
     private var permissionAttentionTask: Task<Void, Never>?
 
     init(
-        aiCredentialStore: any AICredentialStoring = KeychainAICredentialStore(),
+        aiCredentialStore: (any AICredentialStoring)? = nil,
         aiPreferences: UserDefaults = .standard,
         aiEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        let latencyRecorder = StopLatencyRecorder()
+        // A disposable directory supports end-to-end UI checks without loading
+        // or mutating the user's real history, rules, or diagnostic files.
+        let arguments = CommandLine.arguments
+        let testDataArgument = arguments.firstIndex(of: "--inbetween-test-data-directory")
+            .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+        let isolatedDataDirectory = (aiEnvironment["INBETWEEN_TEST_DATA_DIRECTORY"] ?? testDataArgument)
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let useConfiguredKeychainForIsolatedTest = isolatedDataDirectory != nil
+            && arguments.contains(Self.testKeychainArgument)
+        func testDataFile(_ name: String, fallback: URL) -> URL {
+            isolatedDataDirectory?.appendingPathComponent(name, isDirectory: false) ?? fallback
+        }
+
+        let latencyRecorder = StopLatencyRecorder(fileURL: testDataFile(
+            "stop-latency.jsonl",
+            fallback: StopLatencyRecorder.defaultFileURL
+        ))
         self.latencyRecorder = latencyRecorder
-        lifecycleDiagnosticRecorder = LifecycleDiagnosticRecorder()
+        lifecycleDiagnosticRecorder = LifecycleDiagnosticRecorder(fileURL: testDataFile(
+            "lifecycle-diagnostics.jsonl",
+            fallback: LifecycleDiagnosticRecorder.defaultFileURL()
+        ))
         notificationService = LocalNotificationService(latencyRecorder: latencyRecorder)
         launchAtLoginController = LaunchAtLoginController()
         self.aiCredentialStore = aiCredentialStore
+            ?? (isolatedDataDirectory == nil || useConfiguredKeychainForIsolatedTest
+                ? KeychainAICredentialStore()
+                : InMemoryAICredentialStore())
         self.aiPreferences = aiPreferences
         self.aiEnvironment = aiEnvironment
 
-        let store = WaitSessionStore()
+        let store = WaitSessionStore(fileURL: testDataFile(
+            "wait-sessions.json",
+            fallback: WaitSessionStore.defaultFileURL()
+        ))
         sessionStore = store
-        let ruleStore = ContextRuleStore()
+        let ruleStore = ContextRuleStore(fileURL: testDataFile(
+            "context-rules.json",
+            fallback: ContextRuleStore.defaultFileURL()
+        ))
         contextRuleStore = ruleStore
 
         let loadedSessions: [WaitSession]
         do {
             loadedSessions = try store.load()
+            persistedSessionSnapshot = loadedSessions
             storageStatus = "Saved locally at \(store.fileURL.path)"
         } catch {
             loadedSessions = []
+            persistedSessionSnapshot = nil
             storageStatus = "Could not load saved sessions: \(String(describing: error))"
         }
 
@@ -262,7 +356,7 @@ final class LifecycleViewModel: ObservableObject {
     func reflectionStatus(for scope: ReflectionScope) -> String {
         reflectionStatusByScope[scope] ?? (isReflectionConfigured
             ? "Ask a question when you want an interpretation of these local facts."
-            : aiConfigurationStatus)
+            : "Set up Reflection in Settings to ask questions.")
     }
 
     func activateReflectionScope(_ scope: ReflectionScope) {
@@ -311,7 +405,7 @@ final class LifecycleViewModel: ObservableObject {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !reflectionLoadingScopes.contains(scope) else { return }
         guard let coordinator = reflectionCoordinator else {
-            reflectionStatusByScope[scope] = aiConfigurationStatus
+            reflectionStatusByScope[scope] = "Set up Reflection in Settings to ask questions."
             return
         }
         let prepared = reflectionSnapshot(for: scope)
@@ -321,7 +415,7 @@ final class LifecycleViewModel: ObservableObject {
         }
         let expectedKey = ReflectionConversationKey(scope: scope, snapshotFingerprint: prepared.fingerprint)
         reflectionLoadingScopes.insert(scope)
-        reflectionStatusByScope[scope] = "Thinking from the local \(scope.title.lowercased()) snapshot…"
+        reflectionStatusByScope[scope] = "Thinking…"
         Task { [weak self] in
             do {
                 let exchange = try await coordinator.send(question: question, prepared: prepared)
@@ -336,7 +430,7 @@ final class LifecycleViewModel: ObservableObject {
                 }
                 displayedConversationKeys[scope] = expectedKey
                 reflectionMessagesByScope[scope] = exchange.messages
-                reflectionStatusByScope[scope] = "Answer grounded in linked local evidence."
+                reflectionStatusByScope[scope] = ""
                 reflectionLoadingScopes.remove(scope)
             } catch {
                 guard let self else { return }
@@ -393,13 +487,6 @@ final class LifecycleViewModel: ObservableObject {
         persistSessions()
     }
 
-    func markClassificationReviewHandled(for sessionID: UUID) {
-        guard case .updated = sessionTracker.markClassificationReviewHandled(for: sessionID) else { return }
-        sessions = sessionTracker.sessions
-        currentWaitSession = sessionTracker.currentSession
-        persistSessions()
-    }
-
     func setSliceClassificationOverride(
         _ classification: WaitSessionClassification?,
         for unit: WaitClassificationReviewUnit
@@ -413,21 +500,6 @@ final class LifecycleViewModel: ObservableObject {
         currentWaitSession = sessionTracker.currentSession
         persistSessions()
     }
-
-    func markSliceReviewHandled(for unit: WaitClassificationReviewUnit) {
-        guard case .updated = sessionTracker.markClassificationReviewHandled(
-            forSliceIDs: Set(unit.sourceSliceIDs),
-            in: unit.waitSessionID
-        ) else { return }
-        sessions = sessionTracker.sessions
-        currentWaitSession = sessionTracker.currentSession
-        persistSessions()
-    }
-
-    var pendingReviewItems: [WaitReviewItem] {
-        WaitPresentationSupport.pendingReviewItems(from: sessions)
-    }
-
 
     @discardableResult
     func saveContextRule(
@@ -480,23 +552,47 @@ final class LifecycleViewModel: ObservableObject {
     }
 
     private func refreshAIConfiguration() {
-        let savedKey: String?
-        do { savedKey = try aiCredentialStore.apiKey() }
-        catch {
-            reflectionCoordinator = nil
-            aiCredentialSource = nil
-            aiConfigurationStatus = "Keychain could not be read: \(error.localizedDescription)"
-            return
-        }
+        let refreshID = UUID()
+        aiConfigurationRefreshID = refreshID
+        let credentialStore = aiCredentialStore
         let savedModel = aiPreferences.string(forKey: Self.aiModelPreferenceKey)
+        let environment = aiEnvironment
+
+        // Keychain access can block while macOS resolves item permissions. Keep
+        // it off the main actor so menu-bar scene registration can finish.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let savedKey = try await apiKeyWithTimeout(from: credentialStore)
+                await self?.applyAIConfiguration(
+                    savedKey: savedKey,
+                    savedModel: savedModel,
+                    environment: environment,
+                    refreshID: refreshID
+                )
+            } catch {
+                let message = error is AICredentialReadTimeoutError
+                    ? "macOS Keychain did not respond. The saved key was not changed. Review its access in Keychain Access, then restart Inbetween."
+                    : "macOS could not grant Inbetween access to the saved key. It was not changed. Review its access in Keychain Access."
+                await self?.applyAIConfigurationReadError(message, refreshID: refreshID)
+            }
+        }
+    }
+
+    private func applyAIConfiguration(
+        savedKey: String?,
+        savedModel: String?,
+        environment: [String: String],
+        refreshID: UUID
+    ) {
+        guard aiConfigurationRefreshID == refreshID else { return }
         let resolution = FeatherlessConfigurationResolver.resolve(
             storedAPIKey: savedKey,
             storedModel: savedModel,
-            environment: aiEnvironment
+            environment: environment
         )
         aiCredentialSource = resolution.credentialSource
         configuredAIModel = savedModel
-            ?? aiEnvironment[FeatherlessConfiguration.modelEnvironmentKey]
+            ?? environment[FeatherlessConfiguration.modelEnvironmentKey]
             ?? ""
         aiConfigurationStatus = resolution.status
         reflectionCoordinator = resolution.configuration.map {
@@ -505,6 +601,13 @@ final class LifecycleViewModel: ObservableObject {
         reflectionMessagesByScope = [:]
         displayedConversationKeys = [:]
         reflectionStatusByScope = [:]
+    }
+
+    private func applyAIConfigurationReadError(_ message: String, refreshID: UUID) {
+        guard aiConfigurationRefreshID == refreshID else { return }
+        reflectionCoordinator = nil
+        aiCredentialSource = nil
+        aiConfigurationStatus = message
     }
 
     private func ingest(
@@ -616,9 +719,16 @@ final class LifecycleViewModel: ObservableObject {
     }
 
     private func persistSessions() {
+        guard let persistedSessionSnapshot else {
+            storageStatus = "Could not save sessions because saved history could not be loaded. Restart Inbetween to load it before saving again."
+            return
+        }
         do {
-            try sessionStore.save(sessionTracker.sessions)
+            try sessionStore.save(sessionTracker.sessions, expecting: persistedSessionSnapshot)
+            self.persistedSessionSnapshot = sessionTracker.sessions
             storageStatus = "Saved locally at \(sessionStore.fileURL.path)"
+        } catch WaitSessionStoreError.staleSnapshot {
+            storageStatus = "Could not save sessions: saved history changed elsewhere. The newer store was preserved; restart Inbetween to load it before saving again."
         } catch {
             storageStatus = "Could not save sessions: \(String(describing: error))"
         }
@@ -820,40 +930,15 @@ final class LifecycleViewModel: ObservableObject {
 private struct MenuBarStatusView: View {
     @ObservedObject var model: LifecycleViewModel
     @Environment(\.openWindow) private var openWindow
-    @StateObject private var hostWindowReference = MenuBarHostWindowReference()
-    @State private var selectedReviewItemID: String?
-
-    private var reviewItems: [WaitReviewItem] { model.pendingReviewItems }
-
-    private var selectedReviewItem: WaitReviewItem? {
-        guard let id = WaitReviewNavigation.resolvedSelectionID(
-            preferredID: selectedReviewItemID,
-            in: reviewItems
-        ) else { return nil }
-        return reviewItems.first { $0.id == id }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             MenuBarStatusHeader(
                 status: model.userFacingWaitStatus,
-                waitStartedAt: model.currentWaitSession?.startTime,
-                reviewCount: reviewItems.count
+                waitStartedAt: model.currentWaitSession?.startTime
             )
 
-            if let item = selectedReviewItem,
-               let position = WaitReviewNavigation.position(of: item.id, in: reviewItems) {
-                CompactNeedsReviewCard(
-                    item: item,
-                    position: position,
-                    canGoPrevious: position.current > 1,
-                    canGoNext: position.current < position.total,
-                    onPrevious: { moveReviewSelection(.previous) },
-                    onNext: { moveReviewSelection(.next) },
-                    onClassify: { classify(item, as: $0) },
-                    onOpenDetails: { showDashboard(.review) }
-                )
-            } else if model.completedHistory.isEmpty {
+            if model.completedHistory.isEmpty {
                 CompactEmptyState()
             }
 
@@ -900,16 +985,9 @@ private struct MenuBarStatusView: View {
         }
         .padding(14)
         .background(.regularMaterial)
-        .background {
-            MenuBarHostWindowReader { window in
-                hostWindowReference.window = window
-            }
-        }
         .onAppear {
             model.refreshReliabilityStatus()
-            resolveReviewSelection()
         }
-        .onChange(of: reviewItems.map(\.id)) { _ in resolveReviewSelection() }
     }
 
     private func showDashboard(_ destination: DashboardDestination) {
@@ -918,92 +996,13 @@ private struct MenuBarStatusView: View {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func resolveReviewSelection() {
-        selectedReviewItemID = WaitReviewNavigation.resolvedSelectionID(
-            preferredID: selectedReviewItemID,
-            in: reviewItems
-        )
-    }
-
-    private func moveReviewSelection(_ direction: WaitReviewNavigation.Direction) {
-        selectedReviewItemID = WaitReviewNavigation.adjacentSelectionID(
-            from: selectedReviewItem?.id,
-            direction: direction,
-            in: reviewItems
-        )
-    }
-
-    private func classify(_ item: WaitReviewItem, as classification: WaitSessionClassification) {
-        let resolvesFinalReviewItem = reviewItems.count == 1
-        WaitReviewResolutionOrder.perform(
-            isFinalItem: resolvesFinalReviewItem,
-            hidePresentation: {
-                hostWindowReference.window?.orderOut(nil)
-            },
-            applyResolution: {
-                selectedReviewItemID = WaitReviewNavigation.selectionIDAfterRemoving(
-                    item.id,
-                    from: reviewItems
-                )
-                switch item.source {
-                case let .sliced(unit):
-                    model.setSliceClassificationOverride(classification, for: unit)
-                case let .legacy(sessionID):
-                    model.setManualClassificationOverride(classification, for: sessionID)
-                }
-            }
-        )
-    }
-}
-
-private final class MenuBarHostWindowReference: ObservableObject {
-    weak var window: NSWindow?
-}
-
-private struct MenuBarHostWindowReader: NSViewRepresentable {
-    let onWindowChanged: (NSWindow?) -> Void
-
-    func makeNSView(context: Context) -> WindowReadingView {
-        WindowReadingView(onWindowChanged: onWindowChanged)
-    }
-
-    func updateNSView(_ nsView: WindowReadingView, context: Context) {
-        nsView.onWindowChanged = onWindowChanged
-    }
-
-    final class WindowReadingView: NSView {
-        var onWindowChanged: (NSWindow?) -> Void
-
-        init(onWindowChanged: @escaping (NSWindow?) -> Void) {
-            self.onWindowChanged = onWindowChanged
-            super.init(frame: .zero)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            onWindowChanged(window)
-        }
-    }
 }
 
 private struct MenuBarStatusHeader: View {
     let status: UserFacingWaitStatus
     let waitStartedAt: Date?
-    let reviewCount: Int
 
     private var presentation: StatePresentation { StatePresentation(status: status) }
-    private var reviewAccessibilitySummary: String {
-        switch reviewCount {
-        case 0: "Nothing needs review."
-        case 1: "1 item needs review."
-        default: "\(reviewCount) items need review."
-        }
-    }
 
     var body: some View {
         HStack(spacing: 11) {
@@ -1019,20 +1018,6 @@ private struct MenuBarStatusHeader: View {
                     Text(presentation.title)
                         .font(.headline)
                         .lineLimit(1)
-                    if reviewCount > 0 {
-                        Text("\(reviewCount)")
-                            .font(.caption2.monospacedDigit().weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.orange, in: Capsule())
-                            .accessibilityLabel("\(reviewCount) items need review")
-                    }
-                }
-                if reviewCount > 0 {
-                    Text("Review waiting")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
                 }
             }
 
@@ -1045,86 +1030,6 @@ private struct MenuBarStatusHeader: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(presentation.title). \(reviewAccessibilitySummary)")
-    }
-}
-
-private struct CompactNeedsReviewCard: View {
-    let item: WaitReviewItem
-    let position: (current: Int, total: Int)
-    let canGoPrevious: Bool
-    let canGoNext: Bool
-    let onPrevious: () -> Void
-    let onNext: () -> Void
-    let onClassify: (WaitSessionClassification) -> Void
-    let onOpenDetails: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Label("Needs Review", systemImage: "questionmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.orange)
-                Spacer()
-                Text("\(position.current) of \(position.total)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.applicationName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(item.contextTitle)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(2, reservesSpace: true)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("\(DisplayFormat.duration(item.duration)) · \(item.startedAt.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 6) {
-                classificationButton("Productive", symbol: "checkmark") {
-                    onClassify(.productive)
-                }
-                classificationButton("Distracted", symbol: "pause.fill") {
-                    onClassify(.distracted)
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button(action: onPrevious) { Image(systemName: "chevron.left") }
-                    .keyboardShortcut(.leftArrow, modifiers: [])
-                    .disabled(!canGoPrevious)
-                    .accessibilityLabel("Previous review item")
-                Button(action: onNext) { Image(systemName: "chevron.right") }
-                    .keyboardShortcut(.rightArrow, modifiers: [])
-                    .disabled(!canGoNext)
-                    .accessibilityLabel("Next review item")
-                Spacer()
-                Button("Review details…", action: onOpenDetails)
-                    .buttonStyle(.borderless)
-            }
-            .controlSize(.small)
-        }
-        .padding(12)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .accessibilityElement(children: .contain)
-    }
-
-    private func classificationButton(
-        _ title: String,
-        symbol: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .labelStyle(.titleOnly)
     }
 }
 
@@ -1169,40 +1074,14 @@ private struct LastSevenDaysGlance: View {
 
 private struct DashboardView: View {
     @ObservedObject var model: LifecycleViewModel
-    @State private var selectedReviewItemID: String?
     @State private var highlightedTimelineSessionID: UUID?
-    @State private var highlightedTimelineReviewItemID: String?
+    @State private var highlightedTimelineSessionIDs: Set<UUID> = []
     @State private var highlightedTimelineSliceIDs: Set<UUID> = []
-
-    private var reviewItems: [WaitReviewItem] { model.pendingReviewItems }
-
-    private var selectedReviewItem: WaitReviewItem? {
-        guard let id = WaitReviewNavigation.resolvedSelectionID(
-            preferredID: selectedReviewItemID,
-            in: reviewItems
-        ) else { return nil }
-        return reviewItems.first { $0.id == id }
-    }
 
     var body: some View {
         NavigationSplitView {
             List(DashboardDestination.allCases, selection: $model.dashboardDestination) { destination in
-                Label {
-                    HStack {
-                        Text(destination.title)
-                        if destination == .review, !reviewItems.isEmpty {
-                            Spacer()
-                            Text("\(reviewItems.count)")
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.orange, in: Capsule())
-                        }
-                    }
-                } icon: {
-                    Image(systemName: destination.symbol)
-                }
+                Label(destination.title, systemImage: destination.symbol)
                 .tag(destination)
             }
             .navigationTitle("Inbetween")
@@ -1211,11 +1090,7 @@ private struct DashboardView: View {
             detail
                 .navigationTitle(model.dashboardDestination.title)
         }
-        .onAppear {
-            model.refreshReliabilityStatus()
-            resolveReviewSelection()
-        }
-        .onChange(of: reviewItems.map(\.id)) { _ in resolveReviewSelection() }
+        .onAppear { model.refreshReliabilityStatus() }
     }
 
     @ViewBuilder
@@ -1225,53 +1100,10 @@ private struct DashboardView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     DashboardStatusSummary(model: model)
-                    if !reviewItems.isEmpty {
-                        Button {
-                            model.dashboardDestination = .review
-                        } label: {
-                            HStack {
-                                Label("\(reviewItems.count) item\(reviewItems.count == 1 ? "" : "s") need review", systemImage: "questionmark.circle.fill")
-                                    .foregroundStyle(.orange)
-                                Spacer()
-                                Text("Review")
-                                Image(systemName: "chevron.right")
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                        }
-                        .buttonStyle(.borderless)
-                    }
                     LastSevenDaysSection(insights: model.historyInsights, sessions: model.sessions)
                 }
                 .padding(24)
                 .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-        case .review:
-            ScrollView {
-                Group {
-                    if let item = selectedReviewItem,
-                       let position = WaitReviewNavigation.position(of: item.id, in: reviewItems) {
-                        NeedsReviewSection(
-                            item: item,
-                            position: position,
-                            canGoPrevious: position.current > 1,
-                            canGoNext: position.current < position.total,
-                            onPrevious: { moveReviewSelection(.previous) },
-                            onNext: { moveReviewSelection(.next) },
-                            onClassify: { classify(item, as: $0) },
-                            onJumpToTimeline: { showInTimeline(item) }
-                        )
-                    } else {
-                        DashboardEmptyState(
-                            title: "Nothing needs review",
-                            detail: "Local classification has no unresolved activity waiting for you.",
-                            symbol: "checkmark.circle.fill",
-                            tint: .green
-                        )
-                    }
-                }
-                .padding(24)
-                .frame(maxWidth: 700)
                 .frame(maxWidth: .infinity)
             }
         case .reflection:
@@ -1307,7 +1139,7 @@ private struct DashboardView: View {
                 HistorySection(
                     sessions: model.completedHistory,
                     highlightedSessionID: $highlightedTimelineSessionID,
-                    highlightedReviewItemID: highlightedTimelineReviewItemID,
+                    highlightedSessionIDs: highlightedTimelineSessionIDs,
                     highlightedSliceIDs: highlightedTimelineSliceIDs,
                     model: model
                 )
@@ -1320,43 +1152,14 @@ private struct DashboardView: View {
         }
     }
 
-    private func resolveReviewSelection() {
-        selectedReviewItemID = WaitReviewNavigation.resolvedSelectionID(
-            preferredID: selectedReviewItemID,
-            in: reviewItems
-        )
-    }
-
-    private func moveReviewSelection(_ direction: WaitReviewNavigation.Direction) {
-        selectedReviewItemID = WaitReviewNavigation.adjacentSelectionID(
-            from: selectedReviewItem?.id,
-            direction: direction,
-            in: reviewItems
-        )
-    }
-
-    private func classify(_ item: WaitReviewItem, as classification: WaitSessionClassification) {
-        selectedReviewItemID = WaitReviewNavigation.selectionIDAfterRemoving(item.id, from: reviewItems)
-        switch item.source {
-        case let .sliced(unit):
-            model.setSliceClassificationOverride(classification, for: unit)
-        case let .legacy(sessionID):
-            model.setManualClassificationOverride(classification, for: sessionID)
-        }
-    }
-
-    private func showInTimeline(_ item: WaitReviewItem) {
-        highlightedTimelineSessionID = item.waitSessionID
-        highlightedTimelineReviewItemID = item.id
-        highlightedTimelineSliceIDs = []
-        model.dashboardDestination = .history
-    }
-
     private func showReflectionEvidence(_ evidenceID: String, scope: ReflectionScope) {
-        let links = model.reflectionSnapshot(for: scope).evidenceLinks
-        guard let link = links[evidenceID] else { return }
-        highlightedTimelineSessionID = link.waitSessionID
-        highlightedTimelineReviewItemID = nil
+        let prepared = model.reflectionSnapshot(for: scope)
+        guard let link = prepared.evidenceLinks[evidenceID] else { return }
+        let availableIDs = Set(model.completedHistory.map(\.id))
+        let targets = link.resolvedSessionIDs(availableSessionIDs: availableIDs)
+        guard let firstTarget = targets.first else { return }
+        highlightedTimelineSessionID = firstTarget
+        highlightedTimelineSessionIDs = Set(targets)
         highlightedTimelineSliceIDs = Set(link.sourceSliceIDs)
         model.dashboardDestination = .history
     }
@@ -1380,29 +1183,6 @@ private struct DashboardStatusSummary: View {
                 CurrentWaitCard(session: session, systemStatus: model.systemStatus)
             }
         }
-    }
-}
-
-private struct DashboardEmptyState: View {
-    let title: String
-    let detail: String
-    let symbol: String
-    let tint: Color
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.largeTitle)
-                .foregroundStyle(tint)
-            Text(title)
-                .font(.title3.weight(.semibold))
-            Text(detail)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, minHeight: 280)
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1432,31 +1212,11 @@ private struct EmptyHistoryCard: View {
         SectionCard {
             Label("No completed activity yet", systemImage: "tray")
                 .font(.headline)
-            Text("When Codex completes a wait, Inbetween will classify the captured activity locally and show anything uncertain here for review.")
+            Text("Completed Codex waits and their sampled activity will appear here.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct ReviewQueueStatus: View {
-    var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Nothing needs review")
-                    .font(.subheadline.weight(.semibold))
-                Text("Local classification has no unresolved activity waiting for you.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-        }
-        .padding(.horizontal, 2)
         .accessibilityElement(children: .combine)
     }
 }
@@ -1576,6 +1336,9 @@ private struct ReflectionChatSection: View {
     private var messages: [ReflectionChatMessage] { model.reflectionMessages(for: scope) }
     private var isLoading: Bool { model.reflectionLoadingScopes.contains(scope) }
     private var metrics: AIInsightDurations { prepared.payload.durations }
+    private var suggestedQuestions: [String] {
+        ReflectionSuggestedQuestions.forSnapshot(prepared.payload)
+    }
 
     var body: some View {
         SectionCard {
@@ -1590,24 +1353,25 @@ private struct ReflectionChatSection: View {
                 .frame(width: 230)
             }
 
-            Text("Local calculations stay authoritative. Featherless only interprets the snapshot after you ask a question.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             localSummary
 
             if messages.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Try asking")
-                        .font(.caption.weight(.semibold))
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(scope.suggestedQuestions, id: \.self) { suggestion in
-                            Button(suggestion) {
-                                question = suggestion
-                                submit()
+                if suggestedQuestions.isEmpty {
+                    Text("There isn’t enough recorded activity in this period to suggest a question.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Try asking")
+                            .font(.caption.weight(.semibold))
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(suggestedQuestions, id: \.self) { suggestion in
+                                Button(suggestion) {
+                                    submit(suggestion: suggestion)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
                 }
@@ -1621,15 +1385,31 @@ private struct ReflectionChatSection: View {
                             Text(message.text)
                                 .font(.callout)
                                 .textSelection(.enabled)
+                            if message.role == .assistant, !message.metrics.isEmpty {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(message.metrics) { metric in
+                                        HStack {
+                                            Text(metric.label).foregroundStyle(.secondary)
+                                            Spacer(minLength: 8)
+                                            Text(metric.value).monospacedDigit()
+                                        }
+                                        .font(.caption)
+                                    }
+                                }
+                                .padding(.top, 3)
+                            }
                             if message.role == .assistant, !message.evidenceIDs.isEmpty {
                                 HStack(spacing: 6) {
                                     ForEach(message.evidenceIDs.prefix(3), id: \.self) { evidenceID in
-                                        Button("View evidence", systemImage: "arrow.right.circle") {
-                                            onViewEvidence(evidenceID, scope)
+                                        if let evidence = prepared.payload.evidence.first(where: { $0.id == evidenceID }),
+                                           let link = prepared.evidenceLinks[evidenceID] {
+                                            Button(AIInsightEvidenceNavigation.controlLabel(evidence: evidence, link: link), systemImage: "arrow.right.circle") {
+                                                onViewEvidence(evidenceID, scope)
+                                            }
+                                            .buttonStyle(.borderless)
+                                            .controlSize(.small)
+                                            .disabled(link.resolvedSessionIDs(availableSessionIDs: Set(model.completedHistory.map(\.id))).isEmpty)
                                         }
-                                        .buttonStyle(.borderless)
-                                        .controlSize(.small)
-                                        .disabled(prepared.evidenceLinks[evidenceID] == nil)
                                     }
                                 }
                             }
@@ -1646,7 +1426,7 @@ private struct ReflectionChatSection: View {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
                     .focused($composerFocused)
-                    .onSubmit(submit)
+                    .onSubmit { submit() }
                 Button {
                     submit()
                 } label: {
@@ -1659,10 +1439,12 @@ private struct ReflectionChatSection: View {
             }
 
             HStack {
-                AIStatusRow(
-                    state: model.isReflectionConfigured ? (isLoading ? .loading : .idle) : .unavailable,
-                    text: model.reflectionStatus(for: scope)
-                )
+                if !model.reflectionStatus(for: scope).isEmpty {
+                    AIStatusRow(
+                        state: model.isReflectionConfigured ? (isLoading ? .loading : .idle) : .unavailable,
+                        text: model.reflectionStatus(for: scope)
+                    )
+                }
                 Spacer()
                 if !messages.isEmpty {
                     Button("New Conversation", systemImage: "plus.bubble") {
@@ -1707,6 +1489,13 @@ private struct ReflectionChatSection: View {
                     .foregroundStyle(.secondary)
             }
             if scope == .lastSevenDays {
+                if let firstDay = prepared.payload.days.first,
+                   let lastDay = prepared.payload.days.last {
+                    Text("\(firstDay.date) – \(lastDay.date)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Last seven days from \(firstDay.date) through \(lastDay.date)")
+                }
                 HStack(spacing: 8) {
                     ForEach(prepared.payload.days) { day in
                         VStack(spacing: 1) {
@@ -1731,9 +1520,8 @@ private struct ReflectionChatSection: View {
         }
     }
 
-    private func submit() {
-        let value = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
+    private func submit(suggestion: String? = nil) {
+        guard let value = ReflectionQuestionSubmission.resolve(draft: question, suggestion: suggestion) else { return }
         question = ""
         model.sendReflectionQuestion(value, scope: scope)
     }
@@ -1749,7 +1537,7 @@ private struct ReflectionSection: View {
     let canGenerate: Bool
     let isGenerating: Bool
     let onGenerate: (Bool) -> Void
-    let onViewEvidence: (AIInsight) -> Void
+    let onViewEvidence: (String) -> Void
     let onOpenSettings: () -> Void
 
     private var metrics: AIInsightDurations { prepared.payload.durations }
@@ -1775,7 +1563,7 @@ private struct ReflectionSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Inbetween calculates the totals locally. AI only interprets the summary when you ask.")
+            Text("See how your time was split, then ask for a reflection.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1897,33 +1685,25 @@ private struct ReflectionSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            Text(evidenceLabel(for: insight))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Button("View evidence", systemImage: "arrow.down.to.line") {
-                onViewEvidence(insight)
+            HStack(spacing: 6) {
+                ForEach(insight.evidenceIDs, id: \.self) { evidenceID in
+                    if let evidence = prepared.payload.evidence.first(where: { $0.id == evidenceID }),
+                       let link = prepared.evidenceLinks[evidenceID] {
+                        Button(AIInsightEvidenceNavigation.controlLabel(evidence: evidence, link: link), systemImage: "arrow.down.to.line") {
+                            onViewEvidence(evidenceID)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(link.resolvedSessionIDs(availableSessionIDs: Set(prepared.evidenceLinks.values.flatMap(\.waitSessionIDs))).isEmpty)
+                    }
+                }
             }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(!insight.evidenceIDs.contains(where: { prepared.evidenceLinks[$0] != nil }))
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func evidenceLabel(for insight: AIInsight) -> String {
-        let values = insight.evidenceIDs.compactMap { id in
-            prepared.payload.evidence.first(where: { $0.id == id }).map { evidence in
-                let start = prepared.evidenceLinks[id]?.startedAt.formatted(date: .omitted, time: .shortened)
-                let end = prepared.evidenceLinks[id]?.endedAt.formatted(date: .omitted, time: .shortened)
-                let range = start.flatMap { start in end.map { "\(start)–\($0)" } }
-                return [evidence.kind.rawValue.replacingOccurrences(of: "_", with: " "), range]
-                    .compactMap { $0 }.joined(separator: " · ")
-            }
-        }
-        return values.isEmpty ? "Evidence unavailable" : "Evidence: " + values.joined(separator: ", ")
-    }
 }
 
 #if DEBUG
@@ -2468,158 +2248,16 @@ private struct AIStatusRow: View {
     }
 }
 
-private struct NeedsReviewSection: View {
-    let item: WaitReviewItem
-    let position: (current: Int, total: Int)
-    let canGoPrevious: Bool
-    let canGoNext: Bool
-    let onPrevious: () -> Void
-    let onNext: () -> Void
-    let onClassify: (WaitSessionClassification) -> Void
-    let onJumpToTimeline: () -> Void
-
-    var body: some View {
-        SectionCard {
-            HStack {
-                Label("Needs Review", systemImage: "questionmark.circle")
-                    .font(.headline)
-                Spacer()
-                Text("\(position.current) of \(position.total)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(item.applicationName)
-                        .font(.subheadline.weight(.medium))
-                    if case let .sliced(unit) = item.source {
-                        Text("· \(unit.presenceState.reviewTitle)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                if let location = item.contextLocation {
-                    Text(location)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text(item.contextTitle)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(2)
-                Text(timeRange)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text(DisplayFormat.duration(item.duration))
-                    .font(.subheadline.monospacedDigit().weight(.medium))
-                Text(item.explanation)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if item.before != nil || item.after != nil {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Surrounding activity")
-                        .font(.caption.weight(.semibold))
-                    if let before = item.before {
-                        ReviewContextRow(label: "Before", context: before)
-                    }
-                    if let after = item.after {
-                        ReviewContextRow(label: "After", context: after)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Manual decision needed")
-                    .font(.caption.weight(.semibold))
-                Text("Inbetween’s local rules could not resolve this activity confidently. It remains Unclassified until you choose.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.07))
-            )
-
-            HStack(spacing: 8) {
-                Button("Previous", systemImage: "chevron.left", action: onPrevious)
-                    .keyboardShortcut(.leftArrow, modifiers: [])
-                    .disabled(!canGoPrevious)
-                Spacer()
-                Button("View in timeline", systemImage: "arrow.down.to.line", action: onJumpToTimeline)
-                    .buttonStyle(.borderless)
-                Spacer()
-                Button("Next", systemImage: "chevron.right", action: onNext)
-                    .keyboardShortcut(.rightArrow, modifiers: [])
-                    .disabled(!canGoNext)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            Text("Confirm classification")
-                .font(.caption.weight(.semibold))
-
-            HStack(spacing: 8) {
-                Button("Productive") {
-                    onClassify(.productive)
-                }
-                .buttonStyle(.bordered)
-                Button("Distracted") {
-                    onClassify(.distracted)
-                }
-                .buttonStyle(.bordered)
-            }
-            .controlSize(.small)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Needs Review. \(item.applicationName), \(item.contextTitle), \(timeRange), \(DisplayFormat.spokenDuration(item.duration)). \(position.current) of \(position.total).")
-    }
-
-    private var timeRange: String {
-        let start = item.startedAt.formatted(date: .omitted, time: .shortened)
-        let end = item.endedAt.formatted(date: .omitted, time: .shortened)
-        if Calendar.current.isDate(item.startedAt, inSameDayAs: item.endedAt) {
-            return "\(start) – \(end)"
-        }
-        return "\(item.startedAt.formatted(date: .abbreviated, time: .shortened)) – \(item.endedAt.formatted(date: .abbreviated, time: .shortened))"
-    }
-}
-
-private struct ReviewContextRow: View {
-    let label: String
-    let context: WaitReviewActivityContext
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .frame(width: 38, alignment: .leading)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("\(context.applicationName) · \(context.contextTitle)")
-                    .font(.caption)
-                    .lineLimit(1)
-                Text("\(context.startedAt.formatted(date: .omitted, time: .shortened)) · \(DisplayFormat.duration(context.duration))")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 private struct HistorySection: View {
     let sessions: [WaitSession]
     @Binding var highlightedSessionID: UUID?
-    let highlightedReviewItemID: String?
+    let highlightedSessionIDs: Set<UUID>
     let highlightedSliceIDs: Set<UUID>
     @ObservedObject var model: LifecycleViewModel
     @State private var showsOlderHistory = false
 
     private var visibleSessions: ArraySlice<WaitSession> {
-        let highlightsOlderSession = highlightedSessionID.map { highlighted in
-            !sessions.prefix(5).contains(where: { $0.id == highlighted })
-        } ?? false
+        let highlightsOlderSession = sessions.dropFirst(5).contains { highlightedSessionIDs.contains($0.id) }
         return sessions.prefix(showsOlderHistory || highlightsOlderSession ? sessions.count : 5)
     }
 
@@ -2639,8 +2277,7 @@ private struct HistorySection: View {
                     ForEach(visibleSessions) { session in
                         SessionHistoryRow(
                             session: session,
-                            isHighlighted: highlightedSessionID == session.id,
-                            highlightedReviewItemID: highlightedReviewItemID,
+                            isHighlighted: highlightedSessionIDs.contains(session.id),
                             highlightedSliceIDs: highlightedSliceIDs,
                             model: model
                         )
@@ -2673,7 +2310,6 @@ private struct HistorySection: View {
 private struct SessionHistoryRow: View {
     let session: WaitSession
     let isHighlighted: Bool
-    let highlightedReviewItemID: String?
     let highlightedSliceIDs: Set<UUID>
     @ObservedObject var model: LifecycleViewModel
     @State private var isExpanded = false
@@ -2737,6 +2373,10 @@ private struct SessionHistoryRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Text(session.recordOrigin.presentationLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Record provenance: \(session.recordOrigin.presentationLabel)")
                 if let breakdown = WaitPresentationSupport.historyDurationBreakdown(for: session) {
                     Text(breakdown)
                         .font(.caption2)
@@ -2770,7 +2410,6 @@ private struct SessionHistoryRow: View {
                     HStack(spacing: 6) {
                         classificationButton("Productive", value: .productive)
                         classificationButton("Distracted", value: .distracted)
-                        classificationButton("Unclassified", value: .unclassified)
                     }
                     .controlSize(.small)
                     if session.manualClassificationOverride != nil {
@@ -2792,8 +2431,8 @@ private struct SessionHistoryRow: View {
         .onChange(of: isHighlighted) { highlighted in
             if highlighted { isExpanded = true }
         }
-        .accessibilityLabel("\(completionLabel), \(headerTitle), \(DisplayFormat.spokenDuration(session.duration ?? 0)), \(contextSummary)")
-        .accessibilityHint("Expand for the local classification explanation and observed activity summary.")
+        .accessibilityLabel("\(completionLabel), \(headerTitle), \(DisplayFormat.spokenDuration(session.duration ?? 0)), \(contextSummary), \(session.recordOrigin.presentationLabel)")
+        .accessibilityHint("Expand for the local classification explanation and sampled activity contexts.")
     }
 
     private var completionLabel: String {
@@ -2841,10 +2480,17 @@ private struct SessionHistoryRow: View {
         let visibleIndices = Array(groups.indices.suffix(5))
 
         VStack(alignment: .leading, spacing: 6) {
-            Text("Observed activity")
+            Text("Sampled activity contexts")
                 .font(.caption.weight(.semibold))
+            Text("Inbetween samples the foreground app periodically while a wait is active. Time spans between samples do not prove continuous visibility.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             ForEach(visibleIndices, id: \.self) { index in
-                ActivityHistoryGroupRow(group: groups[index], model: model)
+                ActivityHistoryGroupRow(
+                    group: groups[index],
+                    recordOrigin: session.recordOrigin,
+                    model: model
+                )
             }
             if groups.count > visibleIndices.count {
                 Text("Showing the \(visibleIndices.count) most recent of \(groups.count) activity contexts.")
@@ -2863,15 +2509,14 @@ private struct SessionHistoryRow: View {
             ForEach(units) { unit in
                 SliceClassificationUnitRow(
                     unit: unit,
-                    isHighlighted: highlightedReviewItemID == "slice:\(unit.id)"
-                        || !highlightedSliceIDs.isDisjoint(with: unit.sourceSliceIDs),
+                    recordOrigin: session.recordOrigin,
+                    isHighlighted: !highlightedSliceIDs.isDisjoint(with: unit.sourceSliceIDs),
                     model: model
                 )
             }
-            let durations = WaitHistoryInsights.classificationDurations(for: session)
-            let observed = units.reduce(0) { $0 + $1.totalDuration }
-            if durations.total - observed >= 1 {
-                Text("Unobserved · \(DisplayFormat.duration(durations.total - observed)) · Unclassified")
+            if let unobservedDuration = WaitPresentationSupport.unobservedDuration(for: session),
+               unobservedDuration >= 1 {
+                Text("Unobserved interval · \(DisplayFormat.duration(unobservedDuration))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -2881,13 +2526,20 @@ private struct SessionHistoryRow: View {
 
 private struct SliceClassificationUnitRow: View {
     let unit: WaitClassificationReviewUnit
+    let recordOrigin: ActivityRecordOrigin
     let isHighlighted: Bool
     @ObservedObject var model: LifecycleViewModel
+
+    private var contextProvenanceDescription: String {
+        recordOrigin == .synthetic
+            ? "Synthetic demo context."
+            : unit.context.provenance.presentationDescription
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(unit.label) · \(unit.presenceState.reviewTitle)")
+                Text("\(unit.label) · \(unit.presenceState?.reviewTitle ?? "Presence unknown")")
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -2898,6 +2550,10 @@ private struct SliceClassificationUnitRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                Text(contextProvenanceDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2909,7 +2565,6 @@ private struct SliceClassificationUnitRow: View {
                 Section("Classification") {
                     classificationAction(.productive)
                     classificationAction(.distracted)
-                    classificationAction(.unclassified)
                 }
                 if !unit.sourceSliceIDs.isEmpty {
                     Button("Reset to Automatic", systemImage: "arrow.uturn.backward") {
@@ -2945,7 +2600,7 @@ private struct SliceClassificationUnitRow: View {
                 .fill(isHighlighted ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.035))
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(unit.label), \(unit.presenceState.reviewTitle), \(DisplayFormat.spokenDuration(unit.totalDuration)), \(unit.effectiveClassification?.title ?? "mixed classification")")
+        .accessibilityLabel("\(unit.label), \(unit.presenceState?.reviewTitle ?? "Presence unknown"), \(DisplayFormat.spokenDuration(unit.totalDuration)), \(unit.effectiveClassification?.title ?? "mixed classification"), \(contextProvenanceDescription)")
     }
 
     private func classificationAction(_ classification: WaitSessionClassification) -> some View {
@@ -2960,6 +2615,7 @@ private struct SliceClassificationUnitRow: View {
 
 private struct ActivityHistoryGroupRow: View {
     let group: ActivityHistoryGroup
+    let recordOrigin: ActivityRecordOrigin
     @ObservedObject var model: LifecycleViewModel
 
     var body: some View {
@@ -2987,7 +2643,7 @@ private struct ActivityHistoryGroupRow: View {
                 .buttonStyle(.borderless)
                 .font(.caption2)
                 .accessibilityLabel("Create personal rule from \(group.displayComponents.joined(separator: ", "))")
-                .accessibilityHint("Prefills a new local rule using this observed activity context.")
+                .accessibilityHint("Prefills a new local rule using this recorded activity context.")
             }
         }
         .accessibilityElement(children: .contain)
@@ -3005,12 +2661,17 @@ private struct ActivityHistoryGroupRow: View {
     private var secondaryDetail: String? {
         var details: [String] = []
         if group.segmentCount > 1 {
-            details.append("\(group.segmentCount) observed intervals")
+            details.append("\(group.segmentCount) sampled intervals")
         }
         details.append(contentsOf: UserPresenceState.allCases.compactMap { state in
             guard let duration = group.presenceDurations[state], duration >= 1 else { return nil }
             return "\(state.displayTitle) \(DisplayFormat.duration(duration))"
         })
+        details.append(
+            recordOrigin == .synthetic
+                ? "Synthetic demo context"
+                : group.context.provenance.presentationDescription
+        )
         return details.isEmpty ? nil : details.joined(separator: " · ")
     }
 

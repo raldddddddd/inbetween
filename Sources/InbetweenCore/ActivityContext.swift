@@ -14,6 +14,91 @@ public enum ActivityResourceKind: String, Codable, Sendable {
     case terminal
 }
 
+/// The local mechanism that supplied a context value. It stores source kinds,
+/// never additional activity content.
+public enum ActivityContextValueSource: String, Codable, Equatable, Sendable {
+    case foregroundApplication
+    case accessibility
+    case browserAppleScript
+    case applicationBundle
+    case parserDerived
+    case recentInputEstimate
+    case syntheticDemo
+    case legacyUnknown
+}
+
+public struct ActivityContextProvenance: Codable, Equatable, Sendable {
+    public let applicationIdentity: ActivityContextValueSource
+    public let applicationCategory: ActivityContextValueSource?
+    public let windowTitle: ActivityContextValueSource?
+    public let browserURL: ActivityContextValueSource?
+    public let browserPageTitle: ActivityContextValueSource?
+    public let browserDomain: ActivityContextValueSource?
+    public let resourceMetadata: ActivityContextValueSource?
+    public let presenceEstimate: ActivityContextValueSource?
+
+    public init(
+        applicationIdentity: ActivityContextValueSource = .legacyUnknown,
+        applicationCategory: ActivityContextValueSource? = nil,
+        windowTitle: ActivityContextValueSource? = nil,
+        browserURL: ActivityContextValueSource? = nil,
+        browserPageTitle: ActivityContextValueSource? = nil,
+        browserDomain: ActivityContextValueSource? = nil,
+        resourceMetadata: ActivityContextValueSource? = nil,
+        presenceEstimate: ActivityContextValueSource? = nil
+    ) {
+        self.applicationIdentity = applicationIdentity
+        self.applicationCategory = applicationCategory
+        self.windowTitle = windowTitle
+        self.browserURL = browserURL
+        self.browserPageTitle = browserPageTitle
+        self.browserDomain = browserDomain
+        self.resourceMetadata = resourceMetadata
+        self.presenceEstimate = presenceEstimate
+    }
+
+    public static let syntheticDemo = ActivityContextProvenance(
+        applicationIdentity: .syntheticDemo,
+        applicationCategory: .syntheticDemo,
+        windowTitle: .syntheticDemo,
+        browserURL: .syntheticDemo,
+        browserPageTitle: .syntheticDemo,
+        browserDomain: .syntheticDemo,
+        resourceMetadata: .syntheticDemo,
+        presenceEstimate: .syntheticDemo
+    )
+
+    public var presentationDescription: String {
+        if applicationIdentity == .syntheticDemo { return "Synthetic demo context." }
+        var details: [String] = []
+        if applicationIdentity == .foregroundApplication {
+            details.append("Application identity sampled from the macOS foreground app")
+        }
+        if applicationCategory == .applicationBundle {
+            details.append("App category read from bundle metadata")
+        }
+        if windowTitle == .accessibility {
+            details.append("Window title read through Accessibility")
+        }
+        let browserSource = browserURL ?? browserPageTitle
+        switch browserSource {
+        case .accessibility: details.append("Browser URL or title read through Accessibility")
+        case .browserAppleScript: details.append("Browser URL or title read through browser metadata")
+        default: break
+        }
+        if browserDomain == .parserDerived {
+            details.append("Browser domain derived from the available URL")
+        }
+        if resourceMetadata == .parserDerived {
+            details.append("Project, workspace, document, or terminal details derived from available metadata")
+        }
+        if presenceEstimate == .recentInputEstimate {
+            details.append("Presence estimated from recent input; it does not measure attention")
+        }
+        return details.isEmpty ? "Source details were not recorded for this context." : details.joined(separator: ". ") + "."
+    }
+}
+
 public struct ActivityContextEnrichment: Equatable, Sendable {
     public let browserURL: String?
     public let browserDomain: String?
@@ -22,6 +107,7 @@ public struct ActivityContextEnrichment: Equatable, Sendable {
     public let resourceName: String?
     public let documentName: String?
     public let resourcePath: String?
+    public let source: ActivityContextValueSource
 
     public init(
         browserURL: String? = nil,
@@ -30,7 +116,8 @@ public struct ActivityContextEnrichment: Equatable, Sendable {
         resourceKind: ActivityResourceKind? = nil,
         resourceName: String? = nil,
         documentName: String? = nil,
-        resourcePath: String? = nil
+        resourcePath: String? = nil,
+        source: ActivityContextValueSource = .parserDerived
     ) {
         self.browserURL = browserURL
         self.browserDomain = browserDomain
@@ -39,6 +126,7 @@ public struct ActivityContextEnrichment: Equatable, Sendable {
         self.resourceName = resourceName
         self.documentName = documentName
         self.resourcePath = resourcePath
+        self.source = source
     }
 }
 
@@ -74,6 +162,7 @@ public struct ActivityContext: Codable, Equatable, Sendable {
     public let documentName: String?
     public let resourcePath: String?
     public let presenceState: UserPresenceState?
+    public let provenance: ActivityContextProvenance
 
     public init?(
         applicationBundleIdentifier: String,
@@ -87,7 +176,8 @@ public struct ActivityContext: Codable, Equatable, Sendable {
         resourceName: String? = nil,
         documentName: String? = nil,
         resourcePath: String? = nil,
-        presenceState: UserPresenceState? = nil
+        presenceState: UserPresenceState? = nil,
+        provenance: ActivityContextProvenance = ActivityContextProvenance()
     ) {
         guard let bundleIdentifier = Self.normalized(
             applicationBundleIdentifier,
@@ -140,13 +230,18 @@ public struct ActivityContext: Codable, Equatable, Sendable {
             maximumLength: Self.maximumPathLength
         )
         self.presenceState = presenceState
+        self.provenance = provenance
     }
 
     public func enriching(
         with enrichment: ActivityContextEnrichment?,
         presenceState: UserPresenceState?
     ) -> ActivityContext? {
-        ActivityContext(
+        let resourceWasDerived = enrichment.map {
+            $0.resourceKind != nil || $0.resourceName != nil || $0.documentName != nil || $0.resourcePath != nil
+        } ?? false
+        let browserSource = enrichment?.source
+        return ActivityContext(
             applicationBundleIdentifier: applicationBundleIdentifier,
             applicationName: applicationName,
             applicationCategoryIdentifier: applicationCategoryIdentifier,
@@ -158,7 +253,17 @@ public struct ActivityContext: Codable, Equatable, Sendable {
             resourceName: enrichment?.resourceName ?? resourceName,
             documentName: enrichment?.documentName ?? documentName,
             resourcePath: enrichment?.resourcePath ?? resourcePath,
-            presenceState: presenceState
+            presenceState: presenceState,
+            provenance: ActivityContextProvenance(
+                applicationIdentity: provenance.applicationIdentity,
+                applicationCategory: provenance.applicationCategory,
+                windowTitle: provenance.windowTitle,
+                browserURL: enrichment?.browserURL != nil ? browserSource : provenance.browserURL,
+                browserPageTitle: enrichment?.browserPageTitle != nil ? browserSource : provenance.browserPageTitle,
+                browserDomain: enrichment?.browserDomain != nil ? .parserDerived : provenance.browserDomain,
+                resourceMetadata: resourceWasDerived ? .parserDerived : provenance.resourceMetadata,
+                presenceEstimate: presenceState == nil ? nil : .recentInputEstimate
+            )
         )
     }
 
@@ -217,6 +322,7 @@ public struct ActivityContext: Codable, Equatable, Sendable {
             && resourceName == other.resourceName
             && documentName == other.documentName
             && resourcePath == other.resourcePath
+            && provenance == other.provenance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -232,6 +338,7 @@ public struct ActivityContext: Codable, Equatable, Sendable {
         case documentName
         case resourcePath
         case presenceState
+        case provenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,7 +370,11 @@ public struct ActivityContext: Codable, Equatable, Sendable {
             presenceState: try container.decodeIfPresent(
                 UserPresenceState.self,
                 forKey: .presenceState
-            )
+            ),
+            provenance: try container.decodeIfPresent(
+                ActivityContextProvenance.self,
+                forKey: .provenance
+            ) ?? ActivityContextProvenance()
         ) else {
             throw DecodingError.dataCorrupted(
                 .init(
@@ -292,6 +403,7 @@ public struct ActivityContext: Codable, Equatable, Sendable {
         try container.encodeIfPresent(documentName, forKey: .documentName)
         try container.encodeIfPresent(resourcePath, forKey: .resourcePath)
         try container.encodeIfPresent(presenceState, forKey: .presenceState)
+        try container.encode(provenance, forKey: .provenance)
     }
 
     private static func normalized(_ value: String?, maximumLength: Int) -> String? {

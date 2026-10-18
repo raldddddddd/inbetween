@@ -12,7 +12,11 @@ final class KeychainAICredentialStore: AICredentialStoring, @unchecked Sendable 
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            // The Keychain item may be restricted to an earlier app signature.
+            // Never block startup waiting for a permission dialog; return the
+            // access error so Settings can explain that the saved key is intact.
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

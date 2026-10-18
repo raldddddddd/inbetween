@@ -7,10 +7,10 @@ import NaturalLanguage
 enum ClassificationTitleNormalizer {
     private static let genericTitles: Set<String> = [
         "arc", "audio playing", "brave", "chromium", "google chrome",
-        "microsoft edge", "mozilla firefox", "safari", "youtube"
+        "leetcode", "microsoft edge", "mozilla firefox", "safari", "youtube"
     ]
     private static let trailingChromePattern =
-        #"\s*[-–—|]\s*(?:arc|audio playing|brave|chromium|google chrome|microsoft edge|mozilla firefox|safari|youtube)\s*$"#
+        #"\s*[-–—|]\s*(?:arc|audio playing|brave|chromium|google chrome|leetcode|microsoft edge|mozilla firefox|safari|youtube)\s*$"#
 
     static func normalize(_ value: String?) -> String? {
         guard var normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -52,7 +52,10 @@ public struct SemanticActivityDescription: Equatable, Sendable {
             || Self.browserBundleIdentifiers.contains(context.applicationBundleIdentifier)
         var parts: [String] = []
         if isBrowser {
-            if let title = Self.meaningfulBrowserTitle(context.browserPageTitle ?? context.windowTitle) {
+            // Browser tab APIs and Accessibility do not always agree. A generic
+            // tab title must not hide a useful window title.
+            if let title = Self.meaningfulBrowserTitle(context.browserPageTitle)
+                ?? Self.meaningfulBrowserTitle(context.windowTitle) {
                 parts.append("Page: \(title)")
             }
             if let domain = context.browserDomain.map(Self.normalizedDomain),
@@ -154,7 +157,10 @@ public enum SemanticActivityCategory: String, CaseIterable, Sendable {
     public var prototypes: [String] {
         switch self {
         case .softwareDevelopment:
-            ["software development programming coding source code project workspace"]
+            [
+                "software development programming coding source code project workspace",
+                "solving programming problems coding interview practice algorithms data structures"
+            ]
         case .technicalDocumentation:
             ["technical documentation API reference developer guide"]
         case .studyingLearning:
@@ -269,7 +275,33 @@ public final class NativeSemanticSimilarityProvider: SemanticSimilarityProviding
         let textMagnitude = sqrt(textVector.reduce(0) { $0 + $1 * $1 })
         let prototypeMagnitude = sqrt(prototypeVector.reduce(0) { $0 + $1 * $1 })
         guard textMagnitude > 0, prototypeMagnitude > 0 else { return nil }
-        return dot / (textMagnitude * prototypeMagnitude)
+        let score = dot / (textMagnitude * prototypeMagnitude)
+        return score.isFinite ? score : nil
+    }
+}
+
+/// Content-free semantic fallback reasons. They are safe to persist as local
+/// classification diagnostics because they contain no activity metadata.
+public enum SemanticActivityFallback: Equatable, Sendable {
+    case contextUnavailable
+    case embeddingUnavailable
+    case neutralConcept
+    case insufficientConfidence
+}
+
+public struct SemanticActivityAnalysis: Equatable, Sendable {
+    public let inference: SemanticActivityInference?
+    public let evidence: SemanticEvidence?
+    public let fallback: SemanticActivityFallback?
+
+    public init(
+        inference: SemanticActivityInference?,
+        evidence: SemanticEvidence?,
+        fallback: SemanticActivityFallback?
+    ) {
+        self.inference = inference
+        self.evidence = evidence
+        self.fallback = fallback
     }
 }
 
@@ -277,14 +309,10 @@ public final class NativeSemanticSimilarityProvider: SemanticSimilarityProviding
 /// complete meaningful representation, so unchanged foreground samples are
 /// never embedded repeatedly. No vectors are persisted.
 public final class SemanticActivityAnalyzer: @unchecked Sendable {
-    private enum CacheEntry {
-        case inference(SemanticActivityInference)
-        case unavailable
-    }
     private let provider: any SemanticSimilarityProviding
     private let thresholds: SemanticActivityThresholds
     private let lock = NSLock()
-    private var cache: [String: CacheEntry] = [:]
+    private var cache: [String: SemanticActivityAnalysis] = [:]
 
     public init(
         provider: any SemanticSimilarityProviding = NativeSemanticSimilarityProvider(),
@@ -295,58 +323,85 @@ public final class SemanticActivityAnalyzer: @unchecked Sendable {
     }
 
     public func inference(for context: ActivityContext) -> SemanticActivityInference? {
-        guard let description = SemanticActivityDescription(context: context) else { return nil }
+        analysis(for: context).inference
+    }
+
+    public func evidence(for context: ActivityContext) -> SemanticEvidence? {
+        analysis(for: context).evidence
+    }
+
+    public func analysis(for context: ActivityContext) -> SemanticActivityAnalysis {
+        guard let description = SemanticActivityDescription(context: context) else {
+            return SemanticActivityAnalysis(
+                inference: nil,
+                evidence: nil,
+                fallback: .contextUnavailable
+            )
+        }
         lock.lock()
         if let cached = cache[description.text] {
             lock.unlock()
-            switch cached {
-            case let .inference(inference): return inference
-            case .unavailable: return nil
-            }
+            return cached
         }
         lock.unlock()
 
         let scores = SemanticActivityCategory.allCases.compactMap { category -> (SemanticActivityCategory, Double)? in
             category.prototypes.compactMap {
                 provider.similarity(between: description.text, and: $0)
-            }.max().map { (category, $0) }
-        }.sorted { $0.1 > $1.1 }
-        let inference: SemanticActivityInference?
+            }.filter(\.isFinite).max().map { (category, $0) }
+        }.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            return $0.0.rawValue < $1.0.rawValue
+        }
+        let analysis: SemanticActivityAnalysis
         if let best = scores.first {
             let competitor = scores.dropFirst().first {
                 $0.0.disposition != best.0.disposition
             }
-            inference = SemanticActivityInference(
+            let inference = SemanticActivityInference(
                 description: description,
                 category: best.0,
                 similarity: best.1,
                 competingCategory: competitor?.0,
                 competingSimilarity: competitor?.1
             )
+            let evidence: SemanticEvidence?
+            let fallback: SemanticActivityFallback?
+            if best.0.isProductiveConcept,
+               best.1 >= thresholds.productiveSimilarity,
+               inference.margin >= thresholds.productiveMargin {
+                evidence = .productive(inference)
+                fallback = nil
+            } else if best.0.isPotentiallyDistractingConcept,
+                      best.1 >= thresholds.distractingSimilarity,
+                      inference.margin >= thresholds.distractingMargin {
+                evidence = .distracting(inference)
+                fallback = nil
+            } else if best.0.disposition == .neutral {
+                evidence = nil
+                fallback = .neutralConcept
+            } else {
+                evidence = nil
+                fallback = .insufficientConfidence
+            }
+            analysis = SemanticActivityAnalysis(
+                inference: inference,
+                evidence: evidence,
+                fallback: fallback
+            )
         } else {
-            inference = nil
+            analysis = SemanticActivityAnalysis(
+                inference: nil,
+                evidence: nil,
+                fallback: .embeddingUnavailable
+            )
         }
 
         lock.lock()
         if cache.count >= 256 { cache.removeAll(keepingCapacity: true) }
-        cache[description.text] = inference.map(CacheEntry.inference) ?? .unavailable
+        cache[description.text] = analysis
         lock.unlock()
-        return inference
-    }
-
-    public func evidence(for context: ActivityContext) -> SemanticEvidence? {
-        guard let inference = inference(for: context) else { return nil }
-        if inference.category.isProductiveConcept,
-           inference.similarity >= thresholds.productiveSimilarity,
-           inference.margin >= thresholds.productiveMargin {
-            return .productive(inference)
-        }
-        if inference.category.isPotentiallyDistractingConcept,
-           inference.similarity >= thresholds.distractingSimilarity,
-           inference.margin >= thresholds.distractingMargin {
-            return .distracting(inference)
-        }
-        return nil
+        return analysis
     }
 }
 

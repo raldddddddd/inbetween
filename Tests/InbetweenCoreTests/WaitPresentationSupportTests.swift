@@ -181,14 +181,14 @@ struct WaitPresentationSupportTests {
         #expect(item.contextTitle == "Context unavailable")
     }
 
-    @Test func historyCanExplicitlySetUnclassified() {
+    @Test func historyCannotCreateNewManualUnclassifiedOverride() {
         let value = session(end: 1_100, classification: .productive)
         var tracker = WaitSessionTracker(sessions: [value])
 
-        _ = tracker.setManualClassificationOverride(.unclassified, for: value.id)
+        #expect(tracker.setManualClassificationOverride(.unclassified, for: value.id) == .ignored)
 
-        #expect(tracker.sessions[0].manualClassificationOverride == .unclassified)
-        #expect(tracker.sessions[0].effectiveClassification == .unclassified)
+        #expect(tracker.sessions[0].manualClassificationOverride == nil)
+        #expect(tracker.sessions[0].effectiveClassification == .productive)
     }
 
     @Test func historyBreakdownOmitsCategoriesThatDisplayAsZeroSeconds() {
@@ -202,7 +202,7 @@ struct WaitPresentationSupportTests {
             state: .completed,
             activityClassificationSlices: [
                 ActivityClassificationSlice(
-                    sourceActivitySegmentID: nil,
+                    sourceActivitySegmentID: UUID(),
                     startedAt: start,
                     endedAt: start.addingTimeInterval(10),
                     duration: 10,
@@ -285,14 +285,22 @@ struct WaitPresentationSupportTests {
     @Test func reviewExplanationsUseStoredEvidenceConservatively() {
         let mixed = session(end: 1_100, classification: .unclassified, review: true, reasons: [.mixedEvidence])
         let sparse = session(end: 1_100, classification: .unclassified, review: true, reasons: [.insufficientActivityData])
+        let weakSemantic = session(
+            end: 1_100,
+            classification: .unclassified,
+            review: true,
+            reasons: [.contextDependentActivity, .insufficientSemanticConfidence]
+        )
 
         #expect(WaitPresentationSupport.reviewExplanation(for: mixed) == "Activity was split between productive and distracting evidence.")
         #expect(WaitPresentationSupport.reviewExplanation(for: sparse) == "Not enough activity context was recorded for a confident classification.")
+        #expect(WaitPresentationSupport.reviewExplanation(for: weakSemantic) == "The local semantic match did not meet its confidence threshold.")
     }
 
     @Test func compactDurationFormattingIsHumanReadable() {
         #expect(WaitDurationFormat.compact(41) == "41s")
         #expect(WaitDurationFormat.compact(294) == "4m 54s")
+        #expect(WaitDurationFormat.compact(354) == "5m 54s")
         #expect(WaitDurationFormat.compact(4_320) == "1h 12m")
     }
 

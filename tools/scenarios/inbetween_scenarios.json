@@ -39,29 +39,29 @@
       "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
-      "name": "chatgpt-away-unclassified",
-      "description": "ChatGPT foreground combined with meaningful idle and away time remains Unclassified.",
+      "name": "chatgpt-away-distracted-fallback",
+      "description": "ChatGPT foreground during idle and away time receives the deterministic Distracted fallback.",
       "referenceTime": 1700006400,
       "sessions": [{"id":"chatgpt-away","sessionID":"s-chat","turnID":"t-chat","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006460,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Discussing implementation options","presence":"idle"},{"start":1700006460,"end":1700006520,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Discussing implementation options","presence":"away"}],"manualOverrideSequence":[]}],
-      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":2,"reviewUnits":[{"presence":"idle","totalSeconds":60,"sourceSliceCount":1},{"presence":"away","totalSeconds":60,"sourceSliceCount":1}]}
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
-      "name": "generic-browser-unclassified",
-      "description": "Generic browsing is context-dependent rather than automatically judged.",
+      "name": "generic-browser-distracted-fallback",
+      "description": "Generic browsing uses the deterministic Distracted fallback when local evidence is inconclusive.",
       "referenceTime": 1700006400,
       "sessions": [{"id":"browser","sessionID":"s-browser","turnID":"t-browser","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[]}],
-      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1,"reviewUnits":[{"presence":"active","totalSeconds":120,"sourceSliceCount":1}]}
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
-      "name": "context-dependent-rule-unclassified",
-      "description": "A personal context-dependent rule preserves ambiguity.",
+      "name": "context-dependent-rule-distracted-fallback",
+      "description": "A personal context-dependent rule uses the deterministic Distracted fallback.",
       "referenceTime": 1700006400,
       "personalRules":[{"scope":"browserDomain","pattern":"inbox.example","disposition":"contextDependent"}],
       "sessions": [{"id":"mail","sessionID":"s-mail","turnID":"t-mail","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"inbox.example","pageTitle":"Inbox","presence":"active"}],"manualOverrideSequence":[]}],
-      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1}
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
-      "name": "mixed-evidence-unclassified",
+      "name": "mixed-evidence-binary",
       "description": "A mixed wait contributes its exact Productive and Distracted slice durations.",
       "referenceTime": 1700006400,
       "personalRules":[{"scope":"browserDomain","pattern":"social.example","disposition":"distracting"}],
@@ -70,17 +70,17 @@
     },
     {
       "name": "away-without-strong-context",
-      "description": "Away time is uncertainty, not Productive evidence.",
+      "description": "Away time uses the deterministic Distracted fallback without treating it as Productive evidence.",
       "referenceTime": 1700006400,
       "sessions": [{"id":"away","sessionID":"s-away","turnID":"t-away","start":1700006400,"end":1700006520,"activities":[{"start":1700006400,"end":1700006520,"app":"Finder","bundleID":"com.apple.finder","windowTitle":"Downloads","presence":"away"}],"manualOverrideSequence":[]}],
-      "expected":{"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":120,"reviewUnitCount":1,"reviewUnits":[{"presence":"away","totalSeconds":120,"sourceSliceCount":1}]}
+      "expected":{"productiveSeconds":0,"distractedSeconds":120,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
       "name": "mixed-slice-durations-and-review",
-      "description": "One wait contributes to three duration categories while only its observed Idle context requests review.",
+      "description": "One wait contributes to two categories; idle context receives the deterministic Distracted fallback.",
       "referenceTime": 1700006400,
       "sessions": [{"id":"mixed-three-way","sessionID":"s-three","turnID":"t-three","start":1700006400,"end":1700006470,"activities":[{"start":1700006400,"end":1700006430,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"},{"start":1700006430,"end":1700006450,"app":"Steam","bundleID":"com.valvesoftware.steam","windowTitle":"Library","presence":"active"},{"start":1700006450,"end":1700006465,"app":"ChatGPT","bundleID":"com.openai.chat","windowTitle":"Planning","presence":"idle"}],"manualOverrideSequence":[]}],
-      "expected":{"productiveSeconds":30,"distractedSeconds":20,"unclassifiedSeconds":20,"reviewUnitCount":1,"reviewUnits":[{"presence":"idle","totalSeconds":15,"sourceSliceCount":1}]}
+      "expected":{"productiveSeconds":30,"distractedSeconds":40,"unclassifiedSeconds":0,"reviewUnitCount":0}
     },
     {
       "name": "manual-unclassified-to-productive",
@@ -125,10 +125,10 @@
       "sessions":[
         {"id":"today","sessionID":"s-d0","turnID":"t-d0","start":1700006400,"end":1700006460,"activities":[{"start":1700006400,"end":1700006460,"app":"Xcode","bundleID":"com.apple.dt.Xcode","windowTitle":"Inbetween","presence":"active"}],"manualOverrideSequence":[]},
         {"id":"distracted","sessionID":"s-d1","turnID":"t-d1","start":1699920000,"end":1699920120,"activities":[{"start":1699920000,"end":1699920120,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"social.example","pageTitle":"Feed","presence":"active"}],"manualOverrideSequence":[]},
-        {"id":"unclassified","sessionID":"s-d2","turnID":"t-d2","start":1699833600,"end":1699833690,"activities":[{"start":1699833600,"end":1699833690,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[],"sliceReviewActions":[{"activityIndexes":[0],"action":"leaveUnclassified"}]},
+        {"id":"fallback","sessionID":"s-d2","turnID":"t-d2","start":1699833600,"end":1699833690,"activities":[{"start":1699833600,"end":1699833690,"app":"Google Chrome","bundleID":"com.google.Chrome","domain":"example.net","pageTitle":"Welcome","presence":"active"}],"manualOverrideSequence":[]},
         {"id":"legacy","sessionID":"s-d3","turnID":"t-d3","start":1699747200,"end":1699747230,"classificationMode":"legacyNotRecorded","activities":[],"manualOverrideSequence":[]}
       ],
-      "expected":{"dashboard":{"productiveSeconds":60,"distractedSeconds":120,"unclassifiedSeconds":90,"notRecordedSeconds":30,"days":[{"dayOffset":0,"productiveSeconds":60},{"dayOffset":-1,"distractedSeconds":120},{"dayOffset":-2,"unclassifiedSeconds":90},{"dayOffset":-3,"notRecordedSeconds":30},{"dayOffset":-4,"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":0,"notRecordedSeconds":0}]}}
+      "expected":{"dashboard":{"productiveSeconds":60,"distractedSeconds":210,"unclassifiedSeconds":0,"notRecordedSeconds":30,"days":[{"dayOffset":0,"productiveSeconds":60},{"dayOffset":-1,"distractedSeconds":120},{"dayOffset":-2,"distractedSeconds":90,"unclassifiedSeconds":0},{"dayOffset":-3,"notRecordedSeconds":30},{"dayOffset":-4,"productiveSeconds":0,"distractedSeconds":0,"unclassifiedSeconds":0,"notRecordedSeconds":0}]}}
     },
     {
       "name": "permission-resolved-before-threshold",

@@ -146,14 +146,19 @@ public struct WaitHistoryInsights: Equatable, Sendable {
             else {
                 return nil
             }
-            let periodSessions = sessions.filter { session in
+            let completedInPeriod = sessions.filter { session in
                 guard let completionDate = completionDate(for: session) else { return false }
-                return interval.contains(completionDate)
+                return completionDate >= interval.start && completionDate < interval.end
             }
+            let overlapping = sessions.filter { overlaps($0, interval: interval) }
             return Period(
                 startDate: interval.start,
                 endDate: interval.end,
-                summary: makeSummary(from: periodSessions)
+                summary: makeSummary(
+                    from: overlapping,
+                    overlapping: interval,
+                    completedSessionCount: completedInPeriod.count
+                )
             )
         }
     }
@@ -180,6 +185,48 @@ public struct WaitHistoryInsights: Equatable, Sendable {
             unclassifiedDuration: unclassified,
             notRecordedDuration: notRecorded
         )
+    }
+
+    private static func makeSummary(
+        from sessions: [WaitSession],
+        overlapping interval: DateInterval,
+        completedSessionCount: Int
+    ) -> Summary {
+        var total: TimeInterval = 0
+        var productive: TimeInterval = 0
+        var distracted: TimeInterval = 0
+        var unclassified: TimeInterval = 0
+        var notRecorded: TimeInterval = 0
+
+        for session in sessions {
+            total += overlapDuration(for: session, with: interval)
+            let durations = classificationDurations(for: session, overlapping: interval)
+            productive += durations.productive
+            distracted += durations.distracted
+            unclassified += durations.unclassified
+            notRecorded += durations.notRecorded
+        }
+
+        return Summary(
+            completedSessionCount: completedSessionCount,
+            totalCompletedDuration: total,
+            productiveDuration: productive,
+            distractedDuration: distracted,
+            unclassifiedDuration: unclassified,
+            notRecordedDuration: notRecorded
+        )
+    }
+
+    private static func overlaps(_ session: WaitSession, interval: DateInterval) -> Bool {
+        let end = session.startTime.addingTimeInterval(completedDuration(for: session))
+        return end > interval.start && session.startTime < interval.end
+    }
+
+    private static func overlapDuration(for session: WaitSession, with interval: DateInterval) -> TimeInterval {
+        let end = session.startTime.addingTimeInterval(completedDuration(for: session))
+        let start = max(session.startTime, interval.start)
+        let clippedEnd = min(end, interval.end)
+        return max(0, clippedEnd.timeIntervalSince(start))
     }
 
     private static func completionDate(for session: WaitSession) -> Date? {
@@ -219,9 +266,75 @@ public struct WaitHistoryInsights: Equatable, Sendable {
             }
             remaining -= duration
         }
-        // A malformed or older sliced payload must still reconcile to the wait.
-        // Missing slice coverage is uncertainty, never Not recorded.
-        result.unclassified += max(0, remaining)
+        // Missing slice coverage has no classification record. Keep it separate
+        // from observed activity instead of manufacturing an Unclassified slice.
+        result.notRecorded += max(0, remaining)
+        return result
+    }
+
+    /// Date-bucketed classification follows occurrence time. Legacy whole-wait
+    /// decisions apply to the entire wait interval, including uncovered time;
+    /// sliced records use their exact intervals and report missing coverage as
+    /// Not recorded.
+    public static func classificationDurations(
+        for session: WaitSession,
+        overlapping interval: DateInterval
+    ) -> ClassificationDurations {
+        let total = completedDuration(for: session)
+        guard let slices = session.activityClassificationSlices else {
+            let duration = overlapDuration(for: session, with: interval)
+            switch session.effectiveClassification {
+            case .productive: return .init(productive: duration)
+            case .distracted: return .init(distracted: duration)
+            case .unclassified: return .init(unclassified: duration)
+            case nil: return .init(notRecorded: duration)
+            }
+        }
+
+        var result = ClassificationDurations()
+        var remaining = total
+        var lastEnd: Date?
+        func add(classification: WaitSessionClassification, start: Date, end: Date) {
+            let clippedStart = max(start, interval.start)
+            let clippedEnd = min(end, interval.end)
+            let overlap = max(0, clippedEnd.timeIntervalSince(clippedStart))
+            switch classification {
+            case .productive: result.productive += overlap
+            case .distracted: result.distracted += overlap
+            case .unclassified: result.unclassified += overlap
+            }
+        }
+
+        for slice in slices.sorted(by: {
+            if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }) where remaining > 0 {
+            let allocated = min(remaining, max(0, slice.duration))
+            guard allocated > 0 else { continue }
+            let start = slice.startedAt
+            let end = min(slice.endedAt, start.addingTimeInterval(allocated))
+            if end > start {
+                add(
+                    classification: slice.effectiveClassification,
+                    start: start,
+                    end: end
+                )
+                lastEnd = end
+            }
+            remaining -= allocated
+        }
+        if remaining > 0 {
+            let start = lastEnd ?? session.startTime
+            let end = min(
+                session.startTime.addingTimeInterval(total),
+                start.addingTimeInterval(remaining)
+            )
+            if end > start {
+                let clippedStart = max(start, interval.start)
+                let clippedEnd = min(end, interval.end)
+                result.notRecorded += max(0, clippedEnd.timeIntervalSince(clippedStart))
+            }
+        }
         return result
     }
 }

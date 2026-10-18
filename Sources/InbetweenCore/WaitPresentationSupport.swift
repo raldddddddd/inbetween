@@ -8,7 +8,7 @@ public struct WaitClassificationReviewUnit: Identifiable, Equatable, Sendable {
     public let label: String
     public let subtitle: String?
     public let totalDuration: TimeInterval
-    public let presenceState: UserPresenceState
+    public let presenceState: UserPresenceState?
     public let activeDuration: TimeInterval
     public let idleDuration: TimeInterval
     public let awayDuration: TimeInterval
@@ -23,7 +23,7 @@ public struct WaitClassificationReviewUnit: Identifiable, Equatable, Sendable {
         label: String,
         subtitle: String?,
         totalDuration: TimeInterval,
-        presenceState: UserPresenceState,
+        presenceState: UserPresenceState?,
         activeDuration: TimeInterval,
         idleDuration: TimeInterval,
         awayDuration: TimeInterval,
@@ -221,12 +221,12 @@ public enum WaitPresentationSupport {
         for slice in slices.sorted(by: { $0.startedAt < $1.startedAt }) {
             guard !slice.isUnobservedGap,
                   let sourceID = slice.sourceActivitySegmentID,
-                  let segment = segmentsByID[sourceID],
-                  let presence = segment.context.presenceState
+                  let segment = segmentsByID[sourceID]
             else { continue }
+            let presence = segment.context.presenceState
             if pendingOnly {
                 guard slice.effectiveClassification == .unclassified,
-                      slice.automaticClassificationResult.reviewSuggested,
+                      slice.manualClassificationOverride == nil,
                       !slice.classificationReviewHandled
                 else { continue }
             }
@@ -255,6 +255,13 @@ public enum WaitPresentationSupport {
         return parts.joined(separator: " · ")
     }
 
+    /// Duration explicitly represented by nil-source classification slices.
+    /// Nil means the session uses the older model and has no persisted gap map.
+    public static func unobservedDuration(for session: WaitSession) -> TimeInterval? {
+        guard let slices = session.activityClassificationSlices else { return nil }
+        return slices.filter(\.isUnobservedGap).reduce(0) { $0 + max(0, $1.duration) }
+    }
+
     public static func completionDate(for session: WaitSession) -> Date {
         session.endTime
             ?? session.duration.map { session.startTime.addingTimeInterval($0) }
@@ -269,6 +276,13 @@ public enum WaitPresentationSupport {
 
     public static func reviewExplanation(for session: WaitSession) -> String {
         let reasons = session.classificationResult?.reasonCodes ?? []
+        if reasons.contains(.deterministicFallback) {
+            if reasons.contains(.mixedEvidence),
+               let classification = session.classificationResult?.classification {
+                return "Mixed activity was summarized as \(classification.title) by observed duration; ties resolve to Distracted."
+            }
+            return "The available activity context did not establish Productive activity, so Distracted was chosen as the deterministic fallback."
+        }
         if reasons.contains(.mixedEvidence) {
             return "Activity was split between productive and distracting evidence."
         }
@@ -285,6 +299,19 @@ public enum WaitPresentationSupport {
             if away > 0 {
                 return "Activity included \(WaitDurationFormat.compact(away)) away from the Mac."
             }
+        }
+
+        if reasons.contains(.semanticEmbeddingUnavailable) {
+            return "The local sentence embedding could not score this activity."
+        }
+        if reasons.contains(.insufficientSemanticConfidence) {
+            return "The local semantic match did not meet its confidence threshold."
+        }
+        if reasons.contains(.neutralSemanticCandidate) {
+            return "The strongest local semantic candidate was neutral."
+        }
+        if reasons.contains(.semanticContextUnavailable) {
+            return "No meaningful local activity metadata were available for semantic classification."
         }
 
         if reasons.contains(.contextDependentActivity) {
@@ -459,9 +486,9 @@ public enum WaitPresentationSupport {
         let resourceName: String?
         let documentName: String?
         let resourcePath: String?
-        let presence: UserPresenceState
+        let presence: UserPresenceState?
 
-        init(context: ActivityContext, presence: UserPresenceState) {
+        init(context: ActivityContext, presence: UserPresenceState?) {
             bundle = BuiltInActivityEvidencePolicy.canonicalBundleIdentifier(
                 context.applicationBundleIdentifier
             )
@@ -488,7 +515,7 @@ public enum WaitPresentationSupport {
     private struct MutableReviewUnit {
         let sessionID: UUID
         let context: ActivityContext
-        let presence: UserPresenceState
+        let presence: UserPresenceState?
         var slices: [ActivityClassificationSlice] = []
 
         mutating func append(_ slice: ActivityClassificationSlice) { slices.append(slice) }
@@ -498,7 +525,7 @@ public enum WaitPresentationSupport {
             let duration = slices.reduce(0) { $0 + max(0, $1.duration) }
             let effective = Set(slices.map(\.effectiveClassification))
             return WaitClassificationReviewUnit(
-                id: "\(sessionID.uuidString):\(presence.rawValue):\(ids.map(\.uuidString).joined(separator: ","))",
+                id: "\(sessionID.uuidString):\(presence?.rawValue ?? "unknown"):\(ids.map(\.uuidString).joined(separator: ","))",
                 sourceSliceIDs: ids,
                 waitSessionID: sessionID,
                 context: context,
@@ -538,8 +565,24 @@ public enum WaitPresentationSupport {
 
         private var reason: String {
             let reasons = slices.flatMap(\.automaticClassificationResult.reasonCodes)
+            if reasons.contains(.deterministicFallback) {
+                return "The available activity context did not establish Productive activity, so Distracted was chosen as the deterministic fallback."
+            }
             if reasons.contains(.meaningfulInactiveTime) {
-                return "Foreground context cannot classify \(presence.rawValue) time."
+                let state = presence?.rawValue ?? "unknown-presence"
+                return "Foreground context cannot classify \(state) time."
+            }
+            if reasons.contains(.semanticEmbeddingUnavailable) {
+                return "The local sentence embedding could not score this activity."
+            }
+            if reasons.contains(.insufficientSemanticConfidence) {
+                return "The local semantic match did not meet its confidence threshold."
+            }
+            if reasons.contains(.neutralSemanticCandidate) {
+                return "The strongest local semantic candidate was neutral."
+            }
+            if reasons.contains(.semanticContextUnavailable) {
+                return "No meaningful local activity metadata were available for semantic classification."
             }
             if reasons.contains(.contextDependentActivity) {
                 return "The recorded context is genuinely context-dependent."
@@ -575,25 +618,20 @@ public enum WaitHistoryContributorAggregator {
         referenceDate: Date = .now,
         calendar: Calendar = .current
     ) -> [WaitHistoryContribution] {
-        guard let today = calendar.dateInterval(of: .day, for: referenceDate)?.start,
-              let start = calendar.date(byAdding: .day, value: -6, to: today),
-              let end = calendar.date(byAdding: .day, value: 1, to: today)
+        guard let today = calendar.dateInterval(of: .day, for: referenceDate),
+              let start = calendar.date(byAdding: .day, value: -6, to: today.start)
         else { return [] }
+        let interval = DateInterval(start: start, end: today.end)
 
-        let matching = sessions.filter { session in
-            guard session.state == .completed,
-                  session.activityClassificationSlices != nil
-                    || session.effectiveClassification == classification
-            else { return false }
-            let completion = WaitPresentationSupport.completionDate(for: session)
-            return completion >= start && completion < end
+        let matching = sessions.filter {
+            $0.state == .completed && sessionOverlaps($0, interval: interval)
         }
 
-        return aggregate(matching, classification: classification)
+        return aggregate(matching, classification: classification, overlapping: interval)
     }
 
     public static func contributors(for session: WaitSession) -> [WaitHistoryContribution] {
-        aggregate([session], classification: nil)
+        aggregate([session], classification: nil, overlapping: nil)
     }
 
     static func normalizedDomain(_ domain: String) -> String {
@@ -603,48 +641,80 @@ public enum WaitHistoryContributorAggregator {
 
     private static func aggregate(
         _ sessions: [WaitSession],
-        classification: WaitSessionClassification?
+        classification: WaitSessionClassification?,
+        overlapping interval: DateInterval?
     ) -> [WaitHistoryContribution] {
         var totals: [ContributorIdentity: TimeInterval] = [:]
 
         for session in sessions {
+            let total = max(0, session.duration ?? session.endTime?.timeIntervalSince(session.startTime) ?? 0)
+            let sessionEnd = session.startTime.addingTimeInterval(total)
             if let slices = session.activityClassificationSlices {
                 let segmentsByID = Dictionary(
                     uniqueKeysWithValues: session.activitySegments.map { ($0.id, $0) }
                 )
-                for slice in slices {
-                    guard classification == nil || slice.effectiveClassification == classification else {
-                        continue
+                var remaining = total
+                var lastEnd: Date?
+                for slice in slices.sorted(by: {
+                    if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                    return $0.id.uuidString < $1.id.uuidString
+                }) where remaining > 0 {
+                    let allocated = min(remaining, max(0, slice.duration))
+                    guard allocated > 0 else { continue }
+                    let end = min(slice.endedAt, slice.startedAt.addingTimeInterval(allocated))
+                    let effective = slice.effectiveClassification
+                    let duration = clippedDuration(
+                        start: slice.startedAt,
+                        end: end,
+                        interval: interval
+                    )
+                    if duration > 0, classification == nil || effective == classification {
+                        if let sourceID = slice.sourceActivitySegmentID,
+                           let segment = segmentsByID[sourceID] {
+                            totals[identity(for: segment.context), default: 0] += duration
+                        } else {
+                            totals[.other, default: 0] += duration
+                        }
                     }
-                    let duration = max(0, slice.duration)
-                    guard duration > 0 else { continue }
-                    if let sourceID = slice.sourceActivitySegmentID,
-                       let segment = segmentsByID[sourceID] {
-                        totals[identity(for: segment.context), default: 0] += duration
-                    } else {
+                    if end > slice.startedAt { lastEnd = end }
+                    remaining -= allocated
+                }
+                if remaining > 0 {
+                    let start = lastEnd ?? session.startTime
+                    let end = min(sessionEnd, start.addingTimeInterval(remaining))
+                    let duration = clippedDuration(start: start, end: end, interval: interval)
+                    if duration > 0, classification == nil || classification == .unclassified {
                         totals[.other, default: 0] += duration
                     }
                 }
                 continue
             }
-            let sessionDuration = max(
-                0,
-                session.duration
-                    ?? session.endTime?.timeIntervalSince(session.startTime)
-                    ?? 0
-            )
-            var remaining = sessionDuration
-
-            for segment in session.activitySegments.sorted(by: { $0.startedAt < $1.startedAt }) {
-                guard remaining > 0 else { break }
-                let duration = min(remaining, max(0, segment.duration ?? 0))
-                guard duration > 0 else { continue }
-                totals[identity(for: segment.context), default: 0] += duration
-                remaining -= duration
+            guard classification == nil || session.effectiveClassification == classification else { continue }
+            var cursor = session.startTime
+            for segment in session.activitySegments.sorted(by: {
+                if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }) {
+                let rawEnd = segment.endedAt
+                    ?? segment.duration.map { segment.startedAt.addingTimeInterval($0) }
+                    ?? segment.startedAt
+                let start = max(cursor, segment.startedAt)
+                let end = min(min(rawEnd, segment.duration.map {
+                    segment.startedAt.addingTimeInterval(max(0, $0))
+                } ?? rawEnd), sessionEnd)
+                guard end > start else { continue }
+                if start > cursor {
+                    let gapDuration = clippedDuration(start: cursor, end: start, interval: interval)
+                    if gapDuration > 0 { totals[.other, default: 0] += gapDuration }
+                }
+                let duration = clippedDuration(start: start, end: end, interval: interval)
+                if duration > 0 { totals[identity(for: segment.context), default: 0] += duration }
+                cursor = end
             }
 
-            if remaining > 0 {
-                totals[.other, default: 0] += remaining
+            if cursor < sessionEnd {
+                let duration = clippedDuration(start: cursor, end: sessionEnd, interval: interval)
+                if duration > 0 { totals[.other, default: 0] += duration }
             }
         }
 
@@ -659,6 +729,23 @@ public enum WaitHistoryContributorAggregator {
             if $0.duration != $1.duration { return $0.duration > $1.duration }
             return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
         }
+    }
+
+    private static func sessionOverlaps(_ session: WaitSession, interval: DateInterval) -> Bool {
+        let end = session.startTime.addingTimeInterval(
+            max(0, session.duration ?? session.endTime?.timeIntervalSince(session.startTime) ?? 0)
+        )
+        return end > interval.start && session.startTime < interval.end
+    }
+
+    private static func clippedDuration(
+        start: Date,
+        end: Date,
+        interval: DateInterval?
+    ) -> TimeInterval {
+        guard end > start else { return 0 }
+        guard let interval else { return end.timeIntervalSince(start) }
+        return max(0, min(end, interval.end).timeIntervalSince(max(start, interval.start)))
     }
 
     private static func identity(for context: ActivityContext) -> ContributorIdentity {

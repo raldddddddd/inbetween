@@ -60,6 +60,20 @@ public struct ActivityClassificationSlice: Identifiable, Codable, Equatable, Sen
     public var isUnobservedGap: Bool { sourceActivitySegmentID == nil }
 }
 
+public enum ActivityRecordOrigin: String, Codable, Equatable, Sendable {
+    case captured
+    case synthetic
+    case legacyUnknown
+
+    public var presentationLabel: String {
+        switch self {
+        case .captured: "Captured locally"
+        case .synthetic: "Synthetic demo"
+        case .legacyUnknown: "Legacy · source unknown"
+        }
+    }
+}
+
 public enum WaitSessionIntentionKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case focus
     case learn
@@ -164,6 +178,8 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
     public var classificationReviewHandled: Bool?
     /// Identifies development-only synthetic records. Real and legacy sessions are nil.
     public let syntheticDataSetID: String?
+    /// Older records without this field decode conservatively as unknown.
+    public let recordOrigin: ActivityRecordOrigin
 
     public init(
         id: UUID = UUID(),
@@ -183,7 +199,8 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         activityClassificationSlices: [ActivityClassificationSlice]? = nil,
         manualClassificationOverride: WaitSessionClassification? = nil,
         classificationReviewHandled: Bool? = nil,
-        syntheticDataSetID: String? = nil
+        syntheticDataSetID: String? = nil,
+        recordOrigin: ActivityRecordOrigin? = nil
     ) {
         self.id = id
         self.codexSessionID = codexSessionID
@@ -203,6 +220,8 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         self.manualClassificationOverride = manualClassificationOverride
         self.classificationReviewHandled = classificationReviewHandled
         self.syntheticDataSetID = syntheticDataSetID
+        self.recordOrigin = recordOrigin
+            ?? (syntheticDataSetID == nil ? .legacyUnknown : .synthetic)
     }
 
     public var isUnresolved: Bool {
@@ -220,15 +239,17 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
     public var shouldRequestClassificationReview: Bool {
         guard state == .completed else { return false }
         if let activityClassificationSlices {
+            let observedSegmentIDs = Set(activitySegments.map(\.id))
             return activityClassificationSlices.contains {
                 !$0.isUnobservedGap
+                    && $0.sourceActivitySegmentID.map(observedSegmentIDs.contains) == true
+                    && $0.manualClassificationOverride == nil
                     && $0.effectiveClassification == .unclassified
-                    && $0.automaticClassificationResult.reviewSuggested
                     && !$0.classificationReviewHandled
             }
         }
-        return automaticClassification == .unclassified
-            && classificationResult?.reviewSuggested == true
+        return manualClassificationOverride == nil
+            && automaticClassification == .unclassified
             && classificationReviewHandled != true
     }
 
@@ -275,6 +296,7 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
         case manualClassificationOverride
         case classificationReviewHandled
         case syntheticDataSetID
+        case recordOrigin
     }
 
     public init(from decoder: Decoder) throws {
@@ -321,6 +343,10 @@ public struct WaitSession: Identifiable, Codable, Equatable, Sendable {
             String.self,
             forKey: .syntheticDataSetID
         )
+        recordOrigin = try container.decodeIfPresent(
+            ActivityRecordOrigin.self,
+            forKey: .recordOrigin
+        ) ?? (syntheticDataSetID == nil ? .legacyUnknown : .synthetic)
     }
 }
 
@@ -482,6 +508,7 @@ public struct WaitSessionTracker: Sendable {
         _ classification: WaitSessionClassification?,
         for sessionID: UUID
     ) -> ClassificationReviewUpdate {
+        guard classification != .unclassified else { return .ignored }
         guard let index = sessions.firstIndex(where: {
             $0.id == sessionID
                 && $0.state == .completed
@@ -513,6 +540,7 @@ public struct WaitSessionTracker: Sendable {
         forSliceIDs sliceIDs: Set<UUID>,
         in sessionID: UUID
     ) -> ClassificationReviewUpdate {
+        guard classification != .unclassified else { return .ignored }
         guard !sliceIDs.isEmpty,
               let sessionIndex = sessions.firstIndex(where: {
                   $0.id == sessionID
@@ -596,7 +624,8 @@ public struct WaitSessionTracker: Sendable {
         let session = WaitSession(
             codexSessionID: event.sessionID,
             codexTurnID: event.turnID,
-            startTime: event.date
+            startTime: event.date,
+            recordOrigin: .captured
         )
         sessions.append(session)
         currentSessionID = session.id

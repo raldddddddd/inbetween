@@ -1,6 +1,18 @@
 import Foundation
+import Darwin
 
-public struct WaitSessionStore {
+public enum WaitSessionStoreError: Error, Equatable, LocalizedError {
+    case staleSnapshot
+
+    public var errorDescription: String? {
+        switch self {
+        case .staleSnapshot:
+            "Saved history changed since it was loaded. The newer store was preserved; restart Inbetween to load it before saving again."
+        }
+    }
+}
+
+public struct WaitSessionStore: Sendable {
     public let fileURL: URL
 
     public init(fileURL: URL = Self.defaultFileURL()) {
@@ -20,6 +32,32 @@ public struct WaitSessionStore {
     }
 
     public func load() throws -> [WaitSession] {
+        try loadFromDisk()
+    }
+
+    /// Unconditionally writes a complete snapshot. Keep this internal for
+    /// isolated fixtures and new backup files; production history updates must
+    /// use the compare-and-save overload below.
+    func save(_ sessions: [WaitSession]) throws {
+        try withExclusiveWriteLock {
+            try writeToDisk(sessions)
+        }
+    }
+
+    /// Saves only when the on-disk snapshot still matches the caller's base.
+    /// The sidecar lock keeps the compare and atomic replacement together for
+    /// all cooperating Inbetween writers.
+    public func save(_ sessions: [WaitSession], expecting expectedSessions: [WaitSession]) throws {
+        try withExclusiveWriteLock {
+            let current = try loadFromDisk()
+            guard current == expectedSessions else {
+                throw WaitSessionStoreError.staleSnapshot
+            }
+            try writeToDisk(sessions)
+        }
+    }
+
+    private func loadFromDisk() throws -> [WaitSession] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
         let decoder = JSONDecoder()
@@ -27,7 +65,7 @@ public struct WaitSessionStore {
         return try decoder.decode([WaitSession].self, from: data)
     }
 
-    public func save(_ sessions: [WaitSession]) throws {
+    private func writeToDisk(_ sessions: [WaitSession]) throws {
         let directoryURL = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directoryURL,
@@ -44,6 +82,27 @@ public struct WaitSessionStore {
             [.posixPermissions: 0o600],
             ofItemAtPath: fileURL.path
         )
+    }
+
+    private func withExclusiveWriteLock<T>(_ operation: () throws -> T) throws -> T {
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let lockURL = URL(fileURLWithPath: fileURL.path + ".lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { _ = Darwin.close(descriptor) }
+
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        return try operation()
     }
 
     public func createTimestampedBackup(

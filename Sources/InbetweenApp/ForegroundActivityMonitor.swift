@@ -136,7 +136,8 @@ struct ScriptableBrowserEnricher: ForegroundActivityEnriching {
     ) async -> ActivityContextEnrichment? {
         if let accessibilityEnrichment = ActivityEnrichmentParser.browser(
             urlString: request.windowDocument,
-            pageTitle: request.windowTitle
+            pageTitle: request.windowTitle,
+            source: .accessibility
         ), accessibilityEnrichment.browserURL != nil {
             return accessibilityEnrichment
         }
@@ -144,7 +145,8 @@ struct ScriptableBrowserEnricher: ForegroundActivityEnriching {
         if let values = await Self.scriptExecutor.execute(browser.script),
            let enrichment = ActivityEnrichmentParser.browser(
                urlString: values.url,
-               pageTitle: values.title
+               pageTitle: values.title,
+               source: .browserAppleScript
            ) {
             return enrichment
         }
@@ -154,7 +156,8 @@ struct ScriptableBrowserEnricher: ForegroundActivityEnriching {
         // to the generic application/window context.
         return ActivityEnrichmentParser.browser(
             urlString: request.windowDocument,
-            pageTitle: request.windowTitle
+            pageTitle: request.windowTitle,
+            source: .accessibility
         )
     }
 
@@ -447,7 +450,12 @@ final class ForegroundActivityMonitor: @unchecked Sendable {
             applicationBundleIdentifier: request.bundleIdentifier,
             applicationName: request.applicationName,
             applicationCategoryIdentifier: request.applicationCategoryIdentifier,
-            windowTitle: request.windowTitle
+            windowTitle: request.windowTitle,
+            provenance: ActivityContextProvenance(
+                applicationIdentity: .foregroundApplication,
+                applicationCategory: request.applicationCategoryIdentifier == nil ? nil : .applicationBundle,
+                windowTitle: request.windowTitle == nil ? nil : .accessibility
+            )
         ), let context = baseContext.enriching(
             with: enrichment,
             presenceState: presence

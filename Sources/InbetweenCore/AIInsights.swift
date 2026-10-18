@@ -14,13 +14,44 @@ public enum ReflectionScope: String, Codable, CaseIterable, Identifiable, Equata
 
     public var id: Self { self }
     public var title: String { self == .today ? "Today" : "Last 7 Days" }
-    public var suggestedQuestions: [String] {
-        switch self {
-        case .today:
-            ["When was I most focused?", "What distracted me today?", "What should I notice about my context switching?"]
-        case .lastSevenDays:
-            ["Which day was I most focused?", "What distracted me most this week?", "How did today compare with Monday?", "Which day was most fragmented?", "What patterns do you notice across the last seven days?"]
+}
+
+public enum ReflectionSuggestedQuestions {
+    public static func forSnapshot(_ snapshot: AIInsightAnalysisSnapshot) -> [String] {
+        guard snapshot.completedSessionCount > 0 else { return [] }
+
+        // Use evidence blocks, which are built only from intervals with both
+        // observed activity context and presence. Snapshot totals can also
+        // include unobserved gaps, so they are not enough to ground a prompt.
+        let observedEvidence = snapshot.evidence.filter {
+            $0.durationSeconds > 0 && ($0.kind == .focusBlock || $0.kind == .distractionCluster)
         }
+        let productive = observedEvidence.contains { $0.kind == .focusBlock }
+        let distracted = observedEvidence.contains { $0.kind == .distractionCluster }
+        let hasContext = snapshot.topContexts.contains { $0.durationSeconds > 0 }
+            || observedEvidence.contains { $0.context != nil }
+        guard !observedEvidence.isEmpty || hasContext else { return [] }
+
+        let period = snapshot.scope == .today ? "today" : "this week"
+        var questions: [String] = []
+        if productive && distracted {
+            questions.append("How did my recorded time divide between Productive and Distracted activity \(period)?")
+        } else if productive {
+            questions.append("What productive work took up the most recorded time \(period)?")
+        } else if distracted {
+            questions.append("Which activities made up my recorded Distracted time \(period)?")
+        } else {
+            questions.append("What activity context took up my recorded time \(period)?")
+        }
+
+        if snapshot.contextSwitchCount > 0 {
+            questions.append("What was happening around my recorded context switches \(period)?")
+        }
+
+        var seen = Set<String>()
+        return questions.filter {
+            seen.insert($0.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")).inserted
+        }.prefix(3).map { $0 }
     }
 }
 
@@ -144,11 +175,38 @@ public struct AIInsightAnalysisSnapshot: Codable, Equatable, Sendable {
 
 /// Local navigation metadata is deliberately excluded from the encoded AI snapshot.
 public struct AIInsightEvidenceLink: Equatable, Sendable {
+    /// Sessions are ordered by the first contributing activity interval.
     public let evidenceID: String
-    public let waitSessionID: UUID
+    public let waitSessionIDs: [UUID]
     public let sourceSliceIDs: [UUID]
     public let startedAt: Date
     public let endedAt: Date
+
+    public func resolvedSessionIDs(availableSessionIDs: Set<UUID>) -> [UUID] {
+        waitSessionIDs.reduce(into: []) { resolved, id in
+            if availableSessionIDs.contains(id), !resolved.contains(id) { resolved.append(id) }
+        }
+    }
+}
+
+public enum AIInsightEvidenceNavigation {
+    public static func controlLabel(evidence: AIInsightEvidence, link: AIInsightEvidenceLink) -> String {
+        if evidence.kind == .daySummary {
+            let date = String(evidence.id.dropFirst("day-".count))
+            return link.waitSessionIDs.count > 1
+                ? "Day · \(link.waitSessionIDs.count) sessions · \(date)"
+                : "Day · \(date)"
+        }
+        let kind: String
+        switch evidence.kind {
+        case .periodSummary: kind = "Period summary"
+        case .daySummary: kind = "Day"
+        case .focusBlock: kind = "Focus"
+        case .distractionCluster: kind = "Distraction"
+        case .contextSwitchCluster: kind = "Context switches"
+        }
+        return "\(kind) · \(link.startedAt.formatted(date: .omitted, time: .shortened))"
+    }
 }
 
 public struct AIInsightPreparedSnapshot: Equatable, Sendable {
@@ -191,11 +249,16 @@ public enum AIInsightSnapshotBuilder {
             return empty(referenceDate: referenceDate, scope: scope)
         }
         let period = DateInterval(start: periodStart, end: today.end)
-        let included = sessions.filter {
-            $0.state == .completed && period.contains(WaitPresentationSupport.completionDate(for: $0))
+        let completed = sessions.filter { $0.state == .completed }
+        // Duration follows the dates when it occurred, independent of the
+        // session's completion date. Session counts remain completion-based.
+        let completedInPeriod = completed.filter {
+            let completion = WaitPresentationSupport.completionDate(for: $0)
+            return completion >= period.start && completion < period.end
         }
-        let intervals = included
+        let intervals = completed
             .flatMap(makeIntervals)
+            .compactMap { clipped($0, to: period) }
             .sorted(by: intervalStartsFirst)
 
         var productive: TimeInterval = 0
@@ -238,10 +301,12 @@ public enum AIInsightSnapshotBuilder {
         var daySummaries: [AIInsightDailySummary] = []
         let dayCount = scope == .today ? 1 : 7
         for offset in 0..<dayCount {
-            guard let dayStart = calendar.date(byAdding: .day, value: offset, to: period.start),
-                  let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { continue }
-            let dayIntervals = intervals.filter { $0.startedAt >= dayStart && $0.startedAt < dayEnd }
-            let daySessions = included.filter {
+            guard let dayAnchor = calendar.date(byAdding: .day, value: offset, to: period.start),
+                  let day = calendar.dateInterval(of: .day, for: dayAnchor) else { continue }
+            let dayStart = day.start
+            let dayEnd = day.end
+            let dayIntervals = intervals.compactMap { clipped($0, to: day) }
+            let daySessions = completedInPeriod.filter {
                 let completion = WaitPresentationSupport.completionDate(for: $0)
                 return completion >= dayStart && completion < dayEnd
             }
@@ -271,11 +336,18 @@ public enum AIInsightSnapshotBuilder {
                 context: nil,
                 switchCount: daySwitches
             ))
-            if let first = dayIntervals.first {
+            if !dayIntervals.isEmpty {
+                // A daily summary can combine multiple waits. Preserve each
+                // source so History can highlight all of them.
+                var sessionIDs: [UUID] = []
+                for interval in dayIntervals where !sessionIDs.contains(interval.sessionID) {
+                    sessionIDs.append(interval.sessionID)
+                }
                 links[dayID] = AIInsightEvidenceLink(
                     evidenceID: dayID,
-                    waitSessionID: first.sessionID,
-                    sourceSliceIDs: dayIntervals.compactMap(\.sliceID),
+                    waitSessionIDs: sessionIDs,
+                    sourceSliceIDs: dayIntervals
+                        .compactMap(\.sliceID),
                     startedAt: dayStart,
                     endedAt: dayEnd
                 )
@@ -310,7 +382,7 @@ public enum AIInsightSnapshotBuilder {
             scope: scope,
             periodStart: timestamp(period.start),
             periodEnd: timestamp(period.end),
-            completedSessionCount: included.count,
+            completedSessionCount: completedInPeriod.count,
             durations: AIInsightDurations(
                 productiveSeconds: seconds(productive),
                 distractedSeconds: seconds(distracted),
@@ -389,38 +461,66 @@ public enum AIInsightSnapshotBuilder {
         )
     }
 
+    private static func clipped(_ interval: Interval, to boundary: DateInterval) -> Interval? {
+        let start = max(interval.startedAt, boundary.start)
+        let end = min(interval.endedAt, boundary.end)
+        guard end > start else { return nil }
+        return Interval(
+            sessionID: interval.sessionID,
+            sliceID: interval.sliceID,
+            sourceSegmentID: interval.sourceSegmentID,
+            startedAt: start,
+            endedAt: end,
+            duration: end.timeIntervalSince(start),
+            classification: interval.classification,
+            context: interval.context,
+            presence: interval.presence
+        )
+    }
+
     private static func makeIntervals(_ session: WaitSession) -> [Interval] {
         let total = max(0, session.duration ?? session.endTime?.timeIntervalSince(session.startTime) ?? 0)
-        let sessionEnd = session.endTime ?? session.startTime.addingTimeInterval(total)
+        let sessionEnd = session.startTime.addingTimeInterval(total)
         guard let slices = session.activityClassificationSlices else {
-            var remaining = total
             var values: [Interval] = []
-            for segment in session.activitySegments.sorted(by: { $0.startedAt < $1.startedAt })
-            where remaining > 0 {
-                let duration = min(remaining, max(0, segment.duration ?? 0))
-                guard duration > 0 else { continue }
+            var cursor = session.startTime
+            for segment in session.activitySegments.sorted(by: {
+                if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }) {
+                let segmentEnd = segment.endedAt
+                    ?? segment.duration.map { segment.startedAt.addingTimeInterval($0) }
+                    ?? segment.startedAt
+                let start = max(cursor, segment.startedAt)
+                let end = min(min(segmentEnd, segment.duration.map {
+                    segment.startedAt.addingTimeInterval(max(0, $0))
+                } ?? segmentEnd), sessionEnd)
+                guard end > start else { continue }
+                if start > cursor {
+                    values.append(Interval(
+                        sessionID: session.id, sliceID: nil, sourceSegmentID: nil,
+                        startedAt: cursor, endedAt: start, duration: start.timeIntervalSince(cursor),
+                        classification: session.effectiveClassification, context: nil, presence: nil
+                    ))
+                }
                 values.append(Interval(
                     sessionID: session.id,
                     sliceID: nil,
                     sourceSegmentID: segment.id,
-                    startedAt: segment.startedAt,
-                    endedAt: min(
-                        segment.endedAt ?? segment.startedAt.addingTimeInterval(duration),
-                        segment.startedAt.addingTimeInterval(duration)
-                    ),
-                    duration: duration,
+                    startedAt: start,
+                    endedAt: end,
+                    duration: end.timeIntervalSince(start),
                     classification: session.effectiveClassification,
                     context: segment.context,
                     presence: segment.context.presenceState
                 ))
-                remaining -= duration
+                cursor = end
             }
-            if remaining > 0 {
-                let start = values.last?.endedAt ?? session.startTime
+            if cursor < sessionEnd {
                 values.append(Interval(
                     sessionID: session.id, sliceID: nil, sourceSegmentID: nil,
-                    startedAt: start, endedAt: min(sessionEnd, start.addingTimeInterval(remaining)),
-                    duration: remaining, classification: session.effectiveClassification,
+                    startedAt: cursor, endedAt: sessionEnd,
+                    duration: sessionEnd.timeIntervalSince(cursor), classification: session.effectiveClassification,
                     context: nil, presence: nil
                 ))
             }
@@ -451,7 +551,7 @@ public enum AIInsightSnapshotBuilder {
             values.append(Interval(
                 sessionID: session.id, sliceID: nil, sourceSegmentID: nil,
                 startedAt: start, endedAt: min(sessionEnd, start.addingTimeInterval(remaining)),
-                duration: remaining, classification: .unclassified, context: nil, presence: nil
+                duration: remaining, classification: nil, context: nil, presence: nil
             ))
         }
         return values
@@ -530,7 +630,11 @@ public enum AIInsightSnapshotBuilder {
         ))
         links[id] = AIInsightEvidenceLink(
             evidenceID: id,
-            waitSessionID: first.sessionID,
+            waitSessionIDs: Array(Set(block.intervals.map(\.sessionID))).sorted { lhs, rhs in
+                let left = block.intervals.first(where: { $0.sessionID == lhs })?.startedAt ?? .distantFuture
+                let right = block.intervals.first(where: { $0.sessionID == rhs })?.startedAt ?? .distantFuture
+                return left == right ? lhs.uuidString < rhs.uuidString : left < right
+            },
             sourceSliceIDs: block.intervals.compactMap(\.sliceID),
             startedAt: block.startedAt,
             endedAt: block.endedAt
@@ -550,7 +654,7 @@ public enum AIInsightSnapshotBuilder {
             var value = values[key] ?? Aggregate(app: app, context: context)
             value.duration += interval.duration
             value.ids.formUnion(links.values.filter {
-                $0.waitSessionID == interval.sessionID
+                $0.waitSessionIDs.contains(interval.sessionID)
                     && interval.sliceID.map($0.sourceSliceIDs.contains) == true
             }.map(\.evidenceID))
             values[key] = value

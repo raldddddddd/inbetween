@@ -3,6 +3,211 @@ import Testing
 @testable import InbetweenCore
 
 struct WaitSessionStoreTests {
+    @Test func concurrentStaleSnapshotsCannotDiscardSessionsOrManualDecisions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inbetween-concurrent-snapshot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("sessions.json")
+        let initialStore = WaitSessionStore(fileURL: fileURL)
+        let firstWriter = WaitSessionStore(fileURL: fileURL)
+        let secondWriter = WaitSessionStore(fileURL: fileURL)
+        let start = Date(timeIntervalSince1970: 20_000)
+        let originalID = UUID()
+        let context = try #require(ActivityContext(
+            applicationBundleIdentifier: "com.example.editor",
+            applicationName: "Editor",
+            windowTitle: "Project.swift",
+            resourceKind: .project,
+            resourceName: "Example project"
+        ))
+        let originalSegment = ActivitySegment(
+            waitSessionID: originalID,
+            context: context,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(120),
+            duration: 120,
+            lastObservedAt: start.addingTimeInterval(120)
+        )
+        let slice = ActivityClassificationSlice(
+            sourceActivitySegmentID: originalSegment.id,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(120),
+            duration: 120,
+            automaticClassificationResult: .init(
+                classification: .distracted,
+                reasonCodes: [.sustainedDistractingApplication]
+            ),
+            manualClassificationOverride: .productive,
+            classificationReviewHandled: true
+        )
+        let original = WaitSession(
+            id: originalID,
+            codexSessionID: "session-original",
+            codexTurnID: "turn-original",
+            startTime: start,
+            endTime: start.addingTimeInterval(120),
+            duration: 120,
+            state: .completed,
+            activitySegments: [originalSegment],
+            classificationResult: .init(
+                classification: .distracted,
+                reasonCodes: [.sustainedDistractingApplication]
+            ),
+            activityClassificationSlices: [slice],
+            manualClassificationOverride: .productive,
+            classificationReviewHandled: true,
+            syntheticDataSetID: "test-dataset",
+            recordOrigin: .synthetic
+        )
+        try initialStore.save([original])
+
+        let firstBase = try firstWriter.load()
+        let secondBase = try secondWriter.load()
+        #expect(firstBase == secondBase)
+        let firstCandidate = firstBase + [WaitSession(
+            codexSessionID: "session-first",
+            codexTurnID: "turn-first",
+            startTime: start.addingTimeInterval(200),
+            duration: 30,
+            state: .completed
+        )]
+        let secondCandidate = secondBase + [WaitSession(
+            codexSessionID: "session-second",
+            codexTurnID: "turn-second",
+            startTime: start.addingTimeInterval(300),
+            duration: 45,
+            state: .completed
+        )]
+
+        let gate = DispatchSemaphore(value: 0)
+        let workers = DispatchGroup()
+        let outcomes = ConcurrentStoreSaveOutcomes()
+        workers.enter()
+        DispatchQueue.global().async {
+            gate.wait()
+            defer { workers.leave() }
+            do {
+                try firstWriter.save(firstCandidate, expecting: firstBase)
+                outcomes.append(.saved)
+            } catch WaitSessionStoreError.staleSnapshot {
+                outcomes.append(.stale)
+            } catch {
+                outcomes.append(.failed(String(describing: error)))
+            }
+        }
+        workers.enter()
+        DispatchQueue.global().async {
+            gate.wait()
+            defer { workers.leave() }
+            do {
+                try secondWriter.save(secondCandidate, expecting: secondBase)
+                outcomes.append(.saved)
+            } catch WaitSessionStoreError.staleSnapshot {
+                outcomes.append(.stale)
+            } catch {
+                outcomes.append(.failed(String(describing: error)))
+            }
+        }
+        gate.signal()
+        gate.signal()
+        workers.wait()
+
+        let results = outcomes.values
+        #expect(results.filter { $0 == .saved }.count == 1)
+        #expect(results.filter { $0 == .stale }.count == 1)
+        #expect(results.allSatisfy {
+            switch $0 {
+            case .saved, .stale: true
+            case .failed: false
+            }
+        })
+
+        let reloaded = try initialStore.load()
+        #expect(reloaded.count == 2)
+        #expect(reloaded.first == original)
+        #expect(reloaded.first?.id == originalID)
+        #expect(reloaded.first?.startTime == start)
+        #expect(reloaded.first?.endTime == start.addingTimeInterval(120))
+        #expect(reloaded.first?.duration == 120)
+        #expect(reloaded.first?.activitySegments == [originalSegment])
+        #expect(reloaded.first?.activityClassificationSlices == [slice])
+        #expect(reloaded.first?.recordOrigin == .synthetic)
+        #expect(reloaded.first?.syntheticDataSetID == "test-dataset")
+        #expect(reloaded.first?.manualClassificationOverride == .productive)
+        #expect(reloaded.first?.classificationReviewHandled == true)
+        #expect(reloaded.first?.activityClassificationSlices?.first?.manualClassificationOverride == .productive)
+        #expect(reloaded.first?.activityClassificationSlices?.first?.classificationReviewHandled == true)
+        let sessionIDs = Set(reloaded.map(\.codexSessionID))
+        let firstCandidateWon = sessionIDs.contains(firstCandidate[1].codexSessionID)
+        let secondCandidateWon = sessionIDs.contains(secondCandidate[1].codexSessionID)
+        #expect(firstCandidateWon != secondCandidateWon)
+        #expect(sessionIDs.contains("session-original"))
+    }
+
+    @Test func staleWholeStoreSnapshotCannotOverwriteNewerHistoryOrReviewDecisions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inbetween-stale-snapshot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("sessions.json")
+        let firstWriter = WaitSessionStore(fileURL: fileURL)
+        let staleWriter = WaitSessionStore(fileURL: fileURL)
+        let start = Date(timeIntervalSince1970: 10_000)
+        let originalID = UUID()
+        let original = WaitSession(
+            id: originalID,
+            codexSessionID: "session-original",
+            codexTurnID: "turn-original",
+            startTime: start,
+            endTime: start.addingTimeInterval(90),
+            duration: 90,
+            state: .completed,
+            activityClassificationSlices: [ActivityClassificationSlice(
+                sourceActivitySegmentID: UUID(),
+                startedAt: start,
+                endedAt: start.addingTimeInterval(90),
+                duration: 90,
+                automaticClassificationResult: .init(
+                    classification: .unclassified,
+                    reasonCodes: [.insufficientActivityData]
+                )
+            )]
+        )
+        try firstWriter.save([original])
+        let staleSnapshot = try staleWriter.load()
+
+        let added = WaitSession(
+            codexSessionID: "session-added",
+            codexTurnID: "turn-added",
+            startTime: start.addingTimeInterval(200),
+            endTime: start.addingTimeInterval(260),
+            duration: 60,
+            state: .completed
+        )
+        var updatedOriginal = original
+        updatedOriginal.manualClassificationOverride = .distracted
+        updatedOriginal.classificationReviewHandled = true
+        var updatedSlices = updatedOriginal.activityClassificationSlices ?? []
+        updatedSlices[0].manualClassificationOverride = .productive
+        updatedSlices[0].classificationReviewHandled = true
+        updatedOriginal.activityClassificationSlices = updatedSlices
+        let newerSnapshot = [updatedOriginal, added]
+        try firstWriter.save(newerSnapshot, expecting: staleSnapshot)
+        let bytesAfterNewerWrite = try Data(contentsOf: fileURL)
+
+        #expect(throws: WaitSessionStoreError.staleSnapshot) {
+            try staleWriter.save(staleSnapshot, expecting: staleSnapshot)
+        }
+
+        let reloaded = try staleWriter.load()
+        #expect(try Data(contentsOf: fileURL) == bytesAfterNewerWrite)
+        #expect(reloaded == newerSnapshot)
+        #expect(Set(reloaded.map(\.id)) == Set([originalID, added.id]))
+        #expect(reloaded[0].manualClassificationOverride == .distracted)
+        #expect(reloaded[0].classificationReviewHandled == true)
+        #expect(reloaded[0].activityClassificationSlices?.first?.manualClassificationOverride == .productive)
+        #expect(reloaded[0].activityClassificationSlices?.first?.classificationReviewHandled == true)
+    }
+
     @Test func completedHistorySurvivesStoreReload() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("inbetween-store-test-\(UUID().uuidString)")
@@ -146,6 +351,47 @@ struct WaitSessionStoreTests {
         #expect(loaded[0].classificationResult == result)
     }
 
+    @Test func semanticDiagnosticAndManualOverrideSurvivePersistenceSeparately() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inbetween-semantic-diagnostic-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = WaitSessionStore(fileURL: directory.appendingPathComponent("sessions.json"))
+        let start = Date(timeIntervalSince1970: 1_000)
+        let segmentID = UUID()
+        let slice = ActivityClassificationSlice(
+            sourceActivitySegmentID: segmentID,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(120),
+            duration: 120,
+            automaticClassificationResult: .init(
+                classification: .unclassified,
+                reasonCodes: [.contextDependentActivity, .noStrongEvidence, .insufficientSemanticConfidence],
+                explanation: "The local semantic match did not meet its confidence threshold.",
+                reviewSuggested: true
+            ),
+            manualClassificationOverride: .distracted,
+            classificationReviewHandled: true
+        )
+        let session = WaitSession(
+            codexSessionID: "classification-session",
+            codexTurnID: "classification-turn",
+            startTime: start,
+            endTime: start.addingTimeInterval(120),
+            duration: 120,
+            state: .completed,
+            activityClassificationSlices: [slice]
+        )
+
+        try store.save([session])
+        let loaded = try #require(store.load().first)
+        let persistedSlice = try #require(loaded.activityClassificationSlices?.first)
+
+        #expect(persistedSlice.automaticClassification == .unclassified)
+        #expect(persistedSlice.automaticClassificationResult.reasonCodes.contains(.insufficientSemanticConfidence))
+        #expect(persistedSlice.effectiveClassification == .distracted)
+        #expect(persistedSlice.classificationReviewHandled)
+    }
+
     @Test func legacyClassificationShapesDecodeWithoutHistoricalReclassification() throws {
         let json = #"""
         [
@@ -182,6 +428,39 @@ struct WaitSessionStoreTests {
         #expect(loaded[1].activityClassificationSlices == nil)
         #expect(loaded[1].automaticClassification == nil)
         #expect(WaitHistoryInsights.classificationDurations(for: loaded[1]).notRecorded == 60)
+    }
+
+    @Test func legacyUnclassifiedActivityWithoutReviewFlagAppearsInManualReview() throws {
+        let json = #"""
+        [{
+          "id":"00000000-0000-0000-0000-000000000003",
+          "codexSessionID":"legacy-unclassified","codexTurnID":"turn-3",
+          "startTime":3000000,"endTime":3060000,"duration":60,
+          "state":"completed","hookSource":"h","hookVersion":1,
+          "activitySegments":[{
+            "id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "waitSessionID":"00000000-0000-0000-0000-000000000003",
+            "context":{"applicationBundleIdentifier":"com.example.legacy","applicationName":"Legacy App","windowTitle":"Captured activity"},
+            "startedAt":3000000,"endedAt":3060000,"duration":60
+          }],
+          "classificationResult":{"classification":"unclassified","reasonCodes":["insufficientActivityData"]}
+        }]
+        """#
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inbetween-legacy-review-eligibility-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = WaitSessionStore(fileURL: directory.appendingPathComponent("sessions.json"))
+        try Data(json.utf8).write(to: store.fileURL)
+
+        let loaded = try store.load()
+        let session = try #require(loaded.first)
+        let reviews = WaitPresentationSupport.pendingReviewItems(from: loaded)
+
+        #expect(session.classificationResult?.reviewSuggested == false)
+        #expect(session.shouldRequestClassificationReview)
+        #expect(reviews.count == 1)
+        #expect(reviews[0].contextTitle == "Captured activity")
     }
 
     @Test func slicedSessionRoundTripPreservesExactSegmentReferenceAndCorrections() throws {
@@ -228,5 +507,30 @@ struct WaitSessionStoreTests {
         #expect(loaded.activityClassificationSlices?.first?.sourceActivitySegmentID == segmentID)
         #expect(loaded.activityClassificationSlices?.first?.automaticClassification == .productive)
         #expect(loaded.activityClassificationSlices?.first?.effectiveClassification == .distracted)
+        #expect(loaded.activityClassificationSlices?.first?.classificationReviewHandled == true)
+        #expect(WaitPresentationSupport.pendingReviewItems(from: [loaded]).isEmpty)
+    }
+}
+
+private final class ConcurrentStoreSaveOutcomes: @unchecked Sendable {
+    enum Value: Equatable {
+        case saved
+        case stale
+        case failed(String)
+    }
+
+    private let lock = NSLock()
+    private var storedValues: [Value] = []
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValues
+    }
+
+    func append(_ value: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedValues.append(value)
     }
 }

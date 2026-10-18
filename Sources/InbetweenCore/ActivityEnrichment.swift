@@ -28,7 +28,8 @@ public struct UserPresencePolicy: Equatable, Sendable {
 public enum ActivityEnrichmentParser {
     public static func browser(
         urlString: String?,
-        pageTitle: String?
+        pageTitle: String?,
+        source: ActivityContextValueSource = .parserDerived
     ) -> ActivityContextEnrichment? {
         let urlString = ActivityContext.sanitizedBrowserURL(urlString)
         let pageTitle = normalized(pageTitle, maximumLength: ActivityContext.maximumTitleLength)
@@ -38,7 +39,8 @@ public enum ActivityEnrichmentParser {
         return ActivityContextEnrichment(
             browserURL: urlString,
             browserDomain: domain,
-            browserPageTitle: pageTitle
+            browserPageTitle: pageTitle,
+            source: source
         )
     }
 

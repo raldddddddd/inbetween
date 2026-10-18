@@ -67,6 +67,132 @@ struct TimeSlicedPresentationTests {
         #expect(units.count == 3)
         #expect(units.flatMap(\.sourceSliceIDs).count == 4)
         #expect(units.allSatisfy { !$0.sourceSliceIDs.isEmpty })
+        #expect(WaitPresentationSupport.unobservedDuration(for: session) == 5)
+        #expect(WaitPresentationSupport.unobservedDuration(for: reviewSession()) == 0)
+    }
+
+    @Test func legacySessionWithoutGapMapDoesNotClaimObservedCoverage() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let session = WaitSession(
+            codexSessionID: "legacy",
+            codexTurnID: "legacy",
+            startTime: start,
+            endTime: start.addingTimeInterval(60),
+            duration: 60,
+            state: .completed
+        )
+
+        #expect(WaitPresentationSupport.unobservedDuration(for: session) == nil)
+    }
+
+    @Test func observedUnclassifiedSlicesRemainReviewableWithoutSuggestionOrPresenceMetadata() throws {
+        let sessionID = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
+        let segmentID = UUID(uuidString: "34343434-3434-3434-3434-343434343434")!
+        let sliceID = UUID(uuidString: "56565656-5656-5656-5656-565656565656")!
+        let start = Date(timeIntervalSince1970: 1_000)
+        let context = try #require(ActivityContext(
+            applicationBundleIdentifier: "com.example.legacy",
+            applicationName: "Legacy App",
+            windowTitle: "Captured work",
+            presenceState: nil
+        ))
+        let segment = ActivitySegment(
+            id: segmentID,
+            waitSessionID: sessionID,
+            context: context,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(60),
+            duration: 60
+        )
+        let slice = ActivityClassificationSlice(
+            id: sliceID,
+            sourceActivitySegmentID: segmentID,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(60),
+            duration: 60,
+            automaticClassificationResult: .init(
+                classification: .unclassified,
+                reasonCodes: [.insufficientActivityData],
+                reviewSuggested: false
+            )
+        )
+        let session = WaitSession(
+            id: sessionID,
+            codexSessionID: "legacy",
+            codexTurnID: "legacy",
+            startTime: start,
+            endTime: start.addingTimeInterval(60),
+            duration: 60,
+            state: .completed,
+            activitySegments: [segment],
+            activityClassificationSlices: [slice]
+        )
+
+        let items = WaitPresentationSupport.pendingReviewItems(from: [session])
+        let unit = try #require(WaitPresentationSupport.pendingReviewUnits(from: [session]).first)
+
+        #expect(session.shouldRequestClassificationReview)
+        #expect(items.count == 1)
+        #expect(items.first?.contextTitle == "Captured work")
+        #expect(unit.presenceState == nil)
+        #expect(unit.sourceSliceIDs == [sliceID])
+    }
+
+    @Test func explicitManualUnclassifiedDecisionIsResolvedAndNotRequeued() {
+        var session = reviewSession()
+        var slices = session.activityClassificationSlices!
+        slices[0].manualClassificationOverride = .unclassified
+        slices[0].classificationReviewHandled = true
+        session.activityClassificationSlices = slices
+
+        let units = WaitPresentationSupport.pendingReviewUnits(from: [session])
+
+        #expect(!units.flatMap(\.sourceSliceIDs).contains(slices[0].id))
+        #expect(session.shouldRequestClassificationReview)
+    }
+
+    @Test func trackerRejectsNewManualUnclassifiedSliceDecision() throws {
+        let session = reviewSession()
+        let slice = try #require(session.activityClassificationSlices?.first)
+        var tracker = WaitSessionTracker(sessions: [session])
+
+        #expect(tracker.setManualClassificationOverride(
+            .unclassified, forSliceIDs: [slice.id], in: session.id
+        ) == .ignored)
+        #expect(tracker.sessions[0].activityClassificationSlices?.first?.manualClassificationOverride == nil)
+    }
+
+    @Test func historyContributorBreakdownMatchesPeriodTotalsForPartialLegacyCoverage() throws {
+        let calendar = utcCalendar()
+        let start = Date(timeIntervalSince1970: 1_704_758_340)
+        let sessionID = UUID()
+        let observed = segment(sessionID, start, 30, 60, "com.apple.dt.Xcode", "Xcode", .active)
+        let session = WaitSession(
+            id: sessionID,
+            codexSessionID: "legacy-partial",
+            codexTurnID: "legacy-partial",
+            startTime: start,
+            endTime: start.addingTimeInterval(120),
+            duration: 120,
+            state: .completed,
+            activitySegments: [observed],
+            classificationResult: result(.productive)
+        )
+        let reference = start.addingTimeInterval(120)
+        let insights = WaitHistoryInsights(
+            sessions: [session], referenceDate: reference, calendar: calendar
+        )
+        let contributions = WaitHistoryContributorAggregator.contributors(
+            from: [session],
+            classification: .productive,
+            referenceDate: reference,
+            calendar: calendar
+        )
+
+        #expect(insights.lastSevenDaysSummary.productiveDuration == 120)
+        #expect(contributions.first { $0.label == "Xcode" }?.duration == 30)
+        #expect(contributions.first { $0.isOther }?.duration == 90)
+        #expect(contributions.reduce(0) { $0 + $1.duration } == 120)
     }
 
     @Test func mixedSliceDurationsDriveDashboardAndScopedCorrection() throws {
@@ -74,8 +200,8 @@ struct TimeSlicedPresentationTests {
         let session = classifiedSession(start: start)
         var values = WaitHistoryInsights.classificationDurations(for: session)
         #expect(values.productive == 20)
-        #expect(values.distracted == 15)
-        #expect(values.unclassified == 25)
+        #expect(values.distracted == 30)
+        #expect(values.unclassified == 10)
         #expect(values.total == 60)
 
         let insights = WaitHistoryInsights(
@@ -84,8 +210,8 @@ struct TimeSlicedPresentationTests {
             calendar: utcCalendar()
         )
         #expect(insights.summary.productiveDuration == 20)
-        #expect(insights.summary.distractedDuration == 15)
-        #expect(insights.summary.unclassifiedDuration == 25)
+        #expect(insights.summary.distractedDuration == 30)
+        #expect(insights.summary.unclassifiedDuration == 10)
 
         var tracker = WaitSessionTracker(sessions: [session])
         let unclassified = try #require(
@@ -98,8 +224,8 @@ struct TimeSlicedPresentationTests {
         )
         values = WaitHistoryInsights.classificationDurations(for: tracker.sessions[0])
         #expect(values.productive == 30)
-        #expect(values.distracted == 15)
-        #expect(values.unclassified == 15) // unobserved gap remains unchanged
+        #expect(values.distracted == 30) // unobserved gap retains the fallback category
+        #expect(values.unclassified == 0)
     }
 
     @Test func contributorsUseExactSliceUUIDAndEffectiveSliceDuration() throws {
@@ -116,7 +242,7 @@ struct TimeSlicedPresentationTests {
         )
         #expect(distracted.first { $0.label == "Xcode" }?.duration == 20)
         #expect(distracted.first { $0.label == "Steam" }?.duration == 15)
-        #expect(distracted.reduce(0) { $0 + $1.duration } == 35)
+        #expect(distracted.reduce(0) { $0 + $1.duration } == 50)
 
         // A slice with no exact UUID match must become Other, even when another
         // segment has identical metadata and timestamps.
@@ -139,7 +265,7 @@ struct TimeSlicedPresentationTests {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         let sliced = classifiedSession(start: start)
         #expect(WaitPresentationSupport.historyDurationBreakdown(for: sliced)
-            == "20s Productive · 15s Distracted · 25s Unclassified")
+            == "20s Productive · 30s Distracted · 10s Unclassified")
 
         let legacy = WaitSession(
             codexSessionID: "legacy", codexTurnID: "legacy",
@@ -226,7 +352,9 @@ struct TimeSlicedPresentationTests {
                 startedAt: start.addingTimeInterval(45),
                 endedAt: start.addingTimeInterval(60),
                 duration: 15,
-                automaticClassificationResult: result(.unclassified, reasons: [.unobservedGap])
+                automaticClassificationResult: result(
+                    .distracted, reasons: [.unobservedGap, .insufficientActivityData, .deterministicFallback]
+                )
             )
         ]
         return WaitSession(

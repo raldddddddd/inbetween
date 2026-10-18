@@ -299,7 +299,7 @@ public enum ScenarioHarness {
             let reviewUnits = WaitPresentationSupport.pendingReviewUnits(from: [session]).map {
                 ScenarioRunResult.ReviewUnitResult(
                     label: $0.label,
-                    presence: $0.presenceState.rawValue,
+                    presence: $0.presenceState?.rawValue ?? "unknown",
                     totalSeconds: $0.totalDuration,
                     sourceSliceCount: $0.sourceSliceIDs.count
                 )
@@ -370,9 +370,6 @@ public enum ScenarioHarness {
                         slices[index].classificationReviewHandled = true
                     case "distracted":
                         slices[index].manualClassificationOverride = .distracted
-                        slices[index].classificationReviewHandled = true
-                    case "unclassified", "leaveUnclassified":
-                        slices[index].manualClassificationOverride = .unclassified
                         slices[index].classificationReviewHandled = true
                     case "clear":
                         slices[index].manualClassificationOverride = nil

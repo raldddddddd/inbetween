@@ -60,6 +60,13 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
     case productiveApplicationCategory
     case distractingApplicationCategory
     case highConfidenceEntertainmentEvidence
+    case codingPracticeContext
+    case codingActivityContext
+    case deterministicFallback
+    case semanticContextUnavailable
+    case semanticEmbeddingUnavailable
+    case neutralSemanticCandidate
+    case insufficientSemanticConfidence
 
     private var value: String {
         switch self {
@@ -85,6 +92,13 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
         case .productiveApplicationCategory: "productiveApplicationCategory"
         case .distractingApplicationCategory: "distractingApplicationCategory"
         case .highConfidenceEntertainmentEvidence: "highConfidenceEntertainmentEvidence"
+        case .codingPracticeContext: "codingPracticeContext"
+        case .codingActivityContext: "codingActivityContext"
+        case .deterministicFallback: "deterministicFallback"
+        case .semanticContextUnavailable: "semanticContextUnavailable"
+        case .semanticEmbeddingUnavailable: "semanticEmbeddingUnavailable"
+        case .neutralSemanticCandidate: "neutralSemanticCandidate"
+        case .insufficientSemanticConfidence: "insufficientSemanticConfidence"
         }
     }
 
@@ -113,6 +127,13 @@ public enum WaitSessionClassificationReason: Codable, Equatable, Sendable {
         case "productiveApplicationCategory": self = .productiveApplicationCategory
         case "distractingApplicationCategory": self = .distractingApplicationCategory
         case "highConfidenceEntertainmentEvidence": self = .highConfidenceEntertainmentEvidence
+        case "codingPracticeContext": self = .codingPracticeContext
+        case "codingActivityContext": self = .codingActivityContext
+        case "deterministicFallback": self = .deterministicFallback
+        case "semanticContextUnavailable": self = .semanticContextUnavailable
+        case "semanticEmbeddingUnavailable": self = .semanticEmbeddingUnavailable
+        case "neutralSemanticCandidate": self = .neutralSemanticCandidate
+        case "insufficientSemanticConfidence": self = .insufficientSemanticConfidence
         default: throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(), debugDescription: "Unsupported wait-session classification reason")
         }
     }
@@ -167,6 +188,23 @@ public struct WaitSessionClassificationRules: Equatable, Sendable {
 }
 
 public struct WaitSessionClassifier: Sendable {
+    private static let codingContextTokens: Set<String> = [
+        "api", "build", "code", "coding", "commit", "compile", "compiler", "debug",
+        "debugging", "git", "gitlab", "implementation", "jupyter", "notebook",
+        "programming", "pullrequest", "repository", "repo", "sdk", "source",
+        "stacktrace", "testcase", "testing", "tests", "unittest"
+    ]
+    private static let codingContextPhrases = [
+        "api reference", "code review", "coding challenge", "coding problem",
+        "debug session", "git repository", "programming exercise", "source code",
+        "unit tests"
+    ]
+    private static let developmentToolBundlePrefixes = [
+        "com.apple.dt.", "com.barebones.", "com.jetbrains.", "com.microsoft.VSCode",
+        "com.panic.Nova", "com.sublimetext."
+    ]
+    private static let sourceFileExtensionPattern =
+        #"(?i)\.(?:c|cc|cpp|cs|css|go|h|hpp|html|ipynb|java|js|jsx|kt|m|mm|php|py|rb|rs|scala|sh|sql|swift|ts|tsx|vue)(?:$|[^a-z0-9])"#
     private static let productiveContextTokens: Set<String> = [
         "api", "coding", "compiler", "course", "courses", "debug", "debugging",
         "developer", "development", "documentation", "docs", "engineering", "guide",
@@ -246,10 +284,11 @@ public struct WaitSessionClassifier: Sendable {
     /// decisions, corrections, and aggregation use the slices themselves.
     public func summary(for slices: [ActivityClassificationSlice]) -> WaitSessionClassificationResult? {
         guard !slices.isEmpty else { return nil }
-        let classifications = Set(slices.map(\.automaticClassification))
+        let observedSlices = slices
+        let classifications = Set(observedSlices.map(\.automaticClassification))
         if classifications.count == 1, let classification = classifications.first {
             var reasons: [WaitSessionClassificationReason] = []
-            for slice in slices {
+            for slice in observedSlices {
                 for reason in slice.automaticClassificationResult.reasonCodes where !reasons.contains(reason) {
                     reasons.append(reason)
                 }
@@ -257,43 +296,100 @@ public struct WaitSessionClassifier: Sendable {
             return .init(
                 classification: classification,
                 reasonCodes: reasons,
-                explanation: slices.first?.automaticClassificationResult.explanation,
-                reviewSuggested: slices.contains { $0.automaticClassificationResult.reviewSuggested }
+                explanation: observedSlices.first?.automaticClassificationResult.explanation,
+                reviewSuggested: observedSlices.contains { $0.automaticClassificationResult.reviewSuggested }
             )
         }
+        let productiveDuration = observedSlices
+            .filter { $0.automaticClassification == .productive }
+            .reduce(0) { $0 + $1.duration }
+        let distractedDuration = observedSlices
+            .filter { $0.automaticClassification == .distracted }
+            .reduce(0) { $0 + $1.duration }
+        let fallback: WaitSessionClassification = productiveDuration > distractedDuration ? .productive : .distracted
         return .init(
-            classification: .unclassified,
-            reasonCodes: [.mixedEvidence, .noStrongEvidence],
-            explanation: "This wait contains differently classified activity intervals.",
-            reviewSuggested: true
+            classification: fallback,
+            reasonCodes: uniqueReasons(in: observedSlices) + [.mixedEvidence, .deterministicFallback],
+            explanation: "This wait contains mixed activity; the summary uses the category with the greater observed duration.",
+            reviewSuggested: false
         )
+    }
+
+    private func uniqueReasons(in slices: [ActivityClassificationSlice]) -> [WaitSessionClassificationReason] {
+        slices.flatMap(\.automaticClassificationResult.reasonCodes).reduce(into: []) { result, reason in
+            if !result.contains(reason) { result.append(reason) }
+        }
     }
 
     public func classify(context: ActivityContext) -> WaitSessionClassificationResult {
         guard context.presenceState == .active else {
             return .init(
-                classification: .unclassified,
-                reasonCodes: [.meaningfulInactiveTime, .noStrongEvidence],
-                explanation: "Idle or away time cannot be inferred from the foreground application.",
-                reviewSuggested: context.presenceState != nil
+                classification: .distracted,
+                reasonCodes: [.meaningfulInactiveTime, .deterministicFallback],
+                explanation: "The captured foreground activity occurred while recent-input metadata indicated idle or away time; it is assigned Distracted as a deterministic fallback."
             )
         }
 
         let canonicalBundle = BuiltInActivityEvidencePolicy.canonicalBundleIdentifier(
             context.applicationBundleIdentifier
         )
-        if let rule = matchingPersonalRule(
+        let personalRule = matchingPersonalRule(
             for: context,
             canonicalBundleIdentifier: canonicalBundle
-        ) {
+        )
+        if personalRule?.disposition == .productive {
+            return .init(
+                classification: .productive,
+                reasonCodes: [.personalProductiveRule, .sustainedProductiveContext],
+                explanation: "A personal Productive rule matched this activity."
+            )
+        }
+        if supportsDistractingContext(context) {
+            return .init(
+                classification: .distracted,
+                reasonCodes: [
+                    .highConfidenceEntertainmentEvidence,
+                    .sustainedDistractingContext,
+                    .richActivityContext
+                ],
+                explanation: "The normalized title contains high-confidence entertainment or gaming evidence."
+            )
+        }
+        // Specific code or programming-task evidence overrides broad personal
+        // application rules, generic app categories, and semantic similarity.
+        // A clear entertainment context above still takes precedence.
+        if supportsCodingActivityContext(context) {
+            var reasons: [WaitSessionClassificationReason] = [.codingActivityContext]
+            if supportsCodingPracticeContext(context) {
+                reasons.append(.codingPracticeContext)
+            }
+            reasons.append(.sustainedProductiveContext)
+            return .init(
+                classification: .productive,
+                reasonCodes: reasons,
+                explanation: "The captured activity context identifies software development or a programming task."
+            )
+        }
+        if let rule = personalRule {
             switch rule.disposition {
             case .productive:
                 return .init(classification: .productive, reasonCodes: [.personalProductiveRule, .sustainedProductiveContext], explanation: "A personal Productive rule matched this activity.")
             case .distracting:
                 return .init(classification: .distracted, reasonCodes: [.personalDistractingRule, .sustainedDistractingContext], explanation: "A personal Distracting rule matched this activity.")
             case .contextDependent:
-                return .init(classification: .unclassified, reasonCodes: [.contextDependentActivity, .noStrongEvidence], explanation: "A personal Context-dependent rule left this activity unresolved.", reviewSuggested: true)
+                return .init(
+                    classification: .distracted,
+                    reasonCodes: [.contextDependentActivity, .noStrongEvidence, .deterministicFallback],
+                    explanation: "A personal Context-dependent rule had no decisive override; the deterministic Distracted fallback was applied."
+                )
             }
+        }
+        if isDevelopmentTool(context) {
+            return .init(
+                classification: .productive,
+                reasonCodes: [.codingActivityContext, .sustainedProductiveApplication],
+                explanation: "The active application is a development environment without conflicting activity context."
+            )
         }
 
         if BuiltInActivityEvidencePolicy.distractingBundleIdentifiers.contains(canonicalBundle)
@@ -336,18 +432,8 @@ public struct WaitSessionClassifier: Sendable {
         if supportsProductiveContext(context) {
             return .init(classification: .productive, reasonCodes: [.sustainedProductiveContext, .richActivityContext], explanation: "Project, workspace, terminal, or learning metadata supports productive activity.")
         }
-        if supportsDistractingContext(context) {
-            return .init(
-                classification: .distracted,
-                reasonCodes: [
-                    .highConfidenceEntertainmentEvidence,
-                    .sustainedDistractingContext,
-                    .richActivityContext
-                ],
-                explanation: "The normalized title contains high-confidence entertainment or gaming evidence."
-            )
-        }
-        if let semantic = semanticAnalyzer.evidence(for: context) {
+        let semanticAnalysis = semanticAnalyzer.analysis(for: context)
+        if let semantic = semanticAnalysis.evidence {
             switch semantic {
             case .productive:
                 return .init(classification: .productive, reasonCodes: [.sustainedSemanticProductiveContext, .richActivityContext], explanation: "Semantic context indicates development, documentation, learning, research, or task work.")
@@ -355,7 +441,30 @@ public struct WaitSessionClassifier: Sendable {
                 return .init(classification: .distracted, reasonCodes: [.sustainedSemanticDistractingContext, .richActivityContext], explanation: "Semantic context strongly indicates entertainment or gaming.")
             }
         }
-        return .init(classification: .unclassified, reasonCodes: [.contextDependentActivity, .noStrongEvidence], explanation: "The available local activity metadata are not strong enough to classify this interval.", reviewSuggested: true)
+        let diagnosticReason: WaitSessionClassificationReason
+        let explanation: String
+        switch semanticAnalysis.fallback {
+        case .contextUnavailable:
+            diagnosticReason = .semanticContextUnavailable
+            explanation = "No meaningful local activity metadata were available for semantic classification."
+        case .embeddingUnavailable:
+            diagnosticReason = .semanticEmbeddingUnavailable
+            explanation = "The local sentence embedding could not score this activity."
+        case .neutralConcept:
+            diagnosticReason = .neutralSemanticCandidate
+            explanation = "The strongest local semantic candidate was neutral."
+        case .insufficientConfidence:
+            diagnosticReason = .insufficientSemanticConfidence
+            explanation = "The local semantic match did not meet its confidence threshold."
+        case nil:
+            diagnosticReason = .noStrongEvidence
+            explanation = "The available local activity metadata are not strong enough to classify this interval."
+        }
+        return .init(
+            classification: .distracted,
+            reasonCodes: [.contextDependentActivity, .noStrongEvidence, diagnosticReason, .deterministicFallback],
+            explanation: "\(explanation) Distracted is the deterministic fallback when the available evidence does not establish productive activity."
+        )
     }
 
     private func gap(from start: Date, to end: Date) -> ActivityClassificationSlice {
@@ -365,10 +474,9 @@ public struct WaitSessionClassifier: Sendable {
             endedAt: end,
             duration: end.timeIntervalSince(start),
             automaticClassificationResult: .init(
-                classification: .unclassified,
-                reasonCodes: [.unobservedGap, .insufficientActivityData],
-                explanation: "Inbetween did not observe activity during this interval.",
-                reviewSuggested: false
+                classification: .distracted,
+                reasonCodes: [.unobservedGap, .insufficientActivityData, .deterministicFallback],
+                explanation: "Inbetween did not observe activity during this interval; Distracted was assigned as the deterministic fallback."
             ),
             classificationReviewHandled: true
         )
@@ -393,7 +501,8 @@ public struct WaitSessionClassifier: Sendable {
                 resourceName: context.resourceName,
                 documentName: context.documentName,
                 resourcePath: context.resourcePath,
-                presenceState: context.presenceState
+                presenceState: context.presenceState,
+                provenance: context.provenance
               )
         else { return nil }
         return evaluator.matchingRule(for: canonicalContext)
@@ -408,6 +517,68 @@ public struct WaitSessionClassifier: Sendable {
         return classificationTitleValues(in: context).contains { value in
             containsAnyPhrase(Self.productiveContextPhrases, in: value)
         }
+    }
+
+    private func supportsCodingActivityContext(_ context: ActivityContext) -> Bool {
+        if supportsCodingPracticeContext(context) { return true }
+
+        let values = metadataValues(in: context)
+        let tokens = Set(values.flatMap { value in
+            value.lowercased().unicodeScalars
+                .split { !CharacterSet.alphanumerics.contains($0) }
+                .map(String.init)
+        })
+        if !tokens.isDisjoint(with: Self.codingContextTokens) {
+            return true
+        }
+        if values.contains(where: { containsAnyPhrase(Self.codingContextPhrases, in: $0) }) {
+            return true
+        }
+        if values.contains(where: { $0.range(of: Self.sourceFileExtensionPattern, options: .regularExpression) != nil }) {
+            return true
+        }
+
+        if let url = context.browserURL,
+           let components = URLComponents(string: url),
+           let host = components.host?.lowercased(),
+           ["github.com", "gitlab.com", "bitbucket.org"].contains(host),
+           components.path.split(separator: "/").count >= 2 {
+            return true
+        }
+
+        return false
+    }
+
+    private func isDevelopmentTool(_ context: ActivityContext) -> Bool {
+        let bundle = BuiltInActivityEvidencePolicy.canonicalBundleIdentifier(
+            context.applicationBundleIdentifier
+        )
+        return Self.developmentToolBundlePrefixes.contains { bundle.hasPrefix($0) }
+            || bundle == "com.apple.Terminal"
+            || bundle == "com.googlecode.iterm2"
+            || bundle == "com.github.atom"
+            || bundle == "org.python.python"
+            || bundle == "org.jupyter.jupyterlab"
+    }
+
+    /// A LeetCode domain alone is not evidence of programming. A problem URL
+    /// with a concrete slug is a specific coding-practice context; a landing,
+    /// discussion, or generic browser page remains context-dependent.
+    private func supportsCodingPracticeContext(_ context: ActivityContext) -> Bool {
+        guard let browserURL = context.browserURL,
+              let components = URLComponents(string: browserURL),
+              let host = components.host?.lowercased(),
+              host == "leetcode.com" || host == "www.leetcode.com"
+        else { return false }
+
+        let path = components.path.split(separator: "/").map {
+            String($0).removingPercentEncoding?.lowercased() ?? String($0).lowercased()
+        }
+        guard path.count >= 2,
+              path[0] == "problems",
+              !["description", "solution", "submissions"].contains(path[1])
+        else { return false }
+        return path[1].unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
     }
 
     private func supportsDistractingContext(_ context: ActivityContext) -> Bool {

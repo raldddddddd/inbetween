@@ -16,6 +16,7 @@ struct ActivityContextTests {
         }
         #expect(tracker.currentSession?.activitySegments.count == 1)
         #expect(tracker.currentSession?.currentActivitySegment?.context.applicationName == "Safari")
+        #expect(tracker.currentSession?.recordOrigin == .captured)
     }
 
     @Test func foregroundTransitionClosesPreviousSegment() throws {
@@ -131,6 +132,50 @@ struct ActivityContextTests {
         #expect(try store.load() == [session])
     }
 
+    @Test func legacyContextDecodesWithUnknownSourcesAndNewContextPersistsProvenance() throws {
+        let legacy = Data(#"{"applicationBundleIdentifier":"com.example.legacy","applicationName":"Legacy App","windowTitle":"Project · Legacy App"}"#.utf8)
+        let decoded = try JSONDecoder().decode(ActivityContext.self, from: legacy)
+        #expect(decoded.provenance.applicationIdentity == .legacyUnknown)
+        #expect(decoded.provenance.windowTitle == nil)
+        #expect(decoded.provenance.presentationDescription == "Source details were not recorded for this context.")
+
+        let captured = try #require(ActivityContext(
+            applicationBundleIdentifier: "com.apple.dt.Xcode",
+            applicationName: "Xcode",
+            applicationCategoryIdentifier: "public.app-category.developer-tools",
+            windowTitle: "Inbetween",
+            provenance: ActivityContextProvenance(
+                applicationIdentity: .foregroundApplication,
+                applicationCategory: .applicationBundle,
+                windowTitle: .accessibility
+            )
+        ))
+        let roundTrip = try JSONDecoder().decode(ActivityContext.self, from: JSONEncoder().encode(captured))
+        #expect(roundTrip.provenance == captured.provenance)
+        #expect(roundTrip.provenance.presentationDescription.contains("sampled from the macOS foreground app"))
+        #expect(roundTrip.provenance.presentationDescription.contains("read through Accessibility"))
+    }
+
+    @Test func enrichmentKeepsObservedBrowserSourceSeparateFromDerivedMetadata() throws {
+        let base = try #require(ActivityContext(
+            applicationBundleIdentifier: "com.apple.Safari",
+            applicationName: "Safari",
+            provenance: ActivityContextProvenance(applicationIdentity: .foregroundApplication)
+        ))
+        let browser = try #require(ActivityEnrichmentParser.browser(
+            urlString: "https://developer.apple.com/documentation/swift",
+            pageTitle: "Swift Documentation",
+            source: .accessibility
+        ))
+        let enriched = try #require(base.enriching(with: browser, presenceState: .active))
+        #expect(enriched.provenance.browserURL == .accessibility)
+        #expect(enriched.provenance.browserPageTitle == .accessibility)
+        #expect(enriched.provenance.browserDomain == .parserDerived)
+        #expect(enriched.provenance.presenceEstimate == .recentInputEstimate)
+        #expect(enriched.provenance.presentationDescription.contains("derived from the available URL"))
+        #expect(enriched.provenance.presentationDescription.contains("does not measure attention"))
+    }
+
     @Test func activitySegmentIdentityRoundTripsAndLegacyMissingIDDecodesSafely() throws {
         let waitID = UUID()
         let segmentID = UUID()
@@ -180,6 +225,31 @@ struct ActivityContextTests {
 
         #expect(sessions[0].activitySegments.isEmpty)
         #expect(sessions[0].classificationResult == nil)
+        #expect(sessions[0].recordOrigin == .legacyUnknown)
+    }
+
+    @Test func taggedLegacySessionDecodesAsSyntheticWithoutChangingItsManualOverride() throws {
+        let data = Data(#"""
+        [{
+          "id":"84E062E1-0810-412A-B084-EC421B738A3A",
+          "codexSessionID":"session-1",
+          "codexTurnID":"turn-1",
+          "startTime":1000000,
+          "state":"completed",
+          "hookSource":"inbetween-demo-seeder",
+          "hookVersion":1,
+          "attentionEvents":[],
+          "syntheticDataSetID":"demo-v1",
+          "manualClassificationOverride":"distracted"
+        }]
+        """#.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+
+        let session = try #require(decoder.decode([WaitSession].self, from: data).first)
+
+        #expect(session.recordOrigin == .synthetic)
+        #expect(session.manualClassificationOverride == .distracted)
     }
 
     @Test func restartLeavesUnobservedOpenSegmentUnfinished() throws {

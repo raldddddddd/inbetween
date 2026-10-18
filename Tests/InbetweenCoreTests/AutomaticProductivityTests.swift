@@ -33,19 +33,22 @@ struct AutomaticProductivityTests {
         #expect(classifier.classify(try completed([segment(bundle: "com.google.Chrome", duration: 120, domain: "social.example")]))?.classification == .distracted)
     }
 
-    @Test func ambiguousAndInactiveEvidenceRemainUnclassified() throws {
+    @Test func ambiguousAndInactiveEvidenceUseDeterministicDistractedFallback() throws {
         let ambiguous = WaitSessionClassifier().classify(try completed([segment(bundle: "com.google.Chrome", duration: 120)]))
-        #expect(ambiguous?.classification == .unclassified)
-        #expect(ambiguous?.reviewSuggested == true)
+        #expect(ambiguous?.classification == .distracted)
+        #expect(ambiguous?.reasonCodes.contains(.deterministicFallback) == true)
+        #expect(ambiguous?.reviewSuggested == false)
         let away = WaitSessionClassifier().classify(try completed([segment(bundle: "com.apple.dt.Xcode", duration: 120, presence: .away)]))
-        #expect(away?.classification == .unclassified)
+        #expect(away?.classification == .distracted)
         #expect(away?.reasonCodes.contains(.meaningfulInactiveTime) == true)
+        #expect(away?.reasonCodes.contains(.deterministicFallback) == true)
     }
 
     @Test func legacyMoveDoesNotAffectNewClassification() throws {
         let oldMove = WaitSessionIntention(kind: .move)
         let result = WaitSessionClassifier().classify(try completed([segment(bundle: "com.apple.dt.Xcode", duration: 120, presence: .away)], intention: oldMove))
-        #expect(result?.classification == .unclassified)
+        #expect(result?.classification == .distracted)
+        #expect(result?.reasonCodes.contains(.deterministicFallback) == true)
     }
 
     @Test func manualOverridePreservesAutomaticResultAndCanClear() throws {
@@ -216,19 +219,23 @@ struct AutomaticProductivityTests {
 
         let ambiguous = WaitSessionClassifier(rules: .init(usuallyProductiveBundleIdentifiers: []), semanticAnalyzer: analyzer)
             .classify(try completed([semanticSegment(app: "Chrome", title: "Ambiguous context", duration: 120)]))
-        #expect(ambiguous?.classification == .unclassified)
+        #expect(ambiguous?.classification == .distracted)
+        #expect(ambiguous?.reasonCodes.contains(.deterministicFallback) == true)
 
         let shortEvidence = WaitSessionClassifier(rules: .init(usuallyProductiveBundleIdentifiers: []), semanticAnalyzer: analyzer)
             .classify(try completed([semanticSegment(app: "Chrome", title: "Software design", duration: 40)], duration: 120))
-        #expect(shortEvidence?.classification == .unclassified)
+        #expect(shortEvidence?.classification == .distracted)
+        #expect(shortEvidence?.reasonCodes.contains(.mixedEvidence) == true)
+        #expect(shortEvidence?.reasonCodes.contains(.deterministicFallback) == true)
 
         let mixed = WaitSessionClassifier(rules: .init(usuallyProductiveBundleIdentifiers: []), semanticAnalyzer: analyzer)
             .classify(try completed([
-                semanticSegment(app: "Chrome", title: "Software design", duration: 70),
-                semanticSegment(app: "Chrome", title: "Entertainment video", duration: 70)
+                semanticSegment(app: "Chrome", title: "Software design", duration: 70, startOffset: 0),
+                semanticSegment(app: "Chrome", title: "Entertainment video", duration: 70, startOffset: 70)
             ], duration: 140))
-        #expect(mixed?.classification == .unclassified)
+        #expect(mixed?.classification == .distracted)
         #expect(mixed?.reasonCodes.contains(.mixedEvidence) == true)
+        #expect(mixed?.reasonCodes.contains(.deterministicFallback) == true)
     }
 
     @Test func capturedTitlesDriveConservativeLocalClassification() throws {
@@ -277,22 +284,22 @@ struct AutomaticProductivityTests {
             (try activeContext(
                 bundle: "com.google.Chrome", app: "Google Chrome", domain: "example.net",
                 pageTitle: "Welcome to the website"
-            ), .unclassified),
+            ), .distracted),
             (try activeContext(
                 bundle: "com.openai.chat", app: "ChatGPT", windowTitle: "New chat"
-            ), .unclassified),
+            ), .distracted),
             (try activeContext(
                 bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
                 pageTitle: "YouTube"
-            ), .unclassified),
+            ), .distracted),
             (try activeContext(
                 bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
                 pageTitle: "heremyas"
-            ), .unclassified),
+            ), .distracted),
             (try activeContext(
                 bundle: "com.google.Chrome", app: "Google Chrome", domain: "youtube.com",
                 pageTitle: "Game theory discussion"
-            ), .unclassified)
+            ), .distracted)
         ]
 
         for (context, expected) in cases {
@@ -459,8 +466,8 @@ struct AutomaticProductivityTests {
         ))
     }
 
-    private func semanticSegment(app: String, title: String, duration: TimeInterval) -> ActivitySegment {
-        let start = Date(timeIntervalSince1970: 1_000)
+    private func semanticSegment(app: String, title: String, duration: TimeInterval, startOffset: TimeInterval = 0) -> ActivitySegment {
+        let start = Date(timeIntervalSince1970: 1_000 + startOffset)
         let context = ActivityContext(applicationBundleIdentifier: "test.\(app.lowercased())", applicationName: app, browserPageTitle: title, presenceState: .active)!
         return ActivitySegment(waitSessionID: UUID(), context: context, startedAt: start, endedAt: start.addingTimeInterval(duration), duration: duration, lastObservedAt: start.addingTimeInterval(duration))
     }
